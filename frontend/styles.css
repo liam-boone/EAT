@@ -720,6 +720,71 @@ dd.sf-good {
   min-width: 0;
 }
 
+.baseline-metrics {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.baseline-metric-group__title {
+  margin: var(--space-2) 0 0;
+}
+
+.baseline-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.baseline-metric__label {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  margin-bottom: 2px;
+}
+
+.baseline-metric__row {
+  display: grid;
+  grid-template-columns: 44px 1fr auto;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.baseline-metric__row-label {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.baseline-metric__bar-track {
+  height: 8px;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.baseline-metric__bar {
+  height: 100%;
+  border-radius: var(--radius-sm);
+}
+
+.baseline-metric__bar--profile {
+  background: var(--accent);
+}
+
+.baseline-metric__bar--baseline {
+  background: var(--text-secondary);
+}
+
+.baseline-metric__row-value {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-primary);
+  white-space: nowrap;
+  text-align: right;
+}
+
 /* --- Charts ---------------------------------------------------------- */
 
 .charts {

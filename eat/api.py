@@ -27,13 +27,12 @@ appends a full snapshot (profile, material, inputs, and the
 already-computed result) to eat.history's JSON-backed log -- see that
 module's docstring for why a JSON file over SQLite here.
 
-GET/POST /baseline and POST /baseline/beam wrap eat.baseline, letting the
-frontend compare a section/beam analysis against a reference "baseline"
-(a built-in extrusion profile, or any history entry set as one) -- see
-that module's docstring. Neither of these routes logs to history: they're
-derived/hypothetical lookups (a percentage comparison, or "what would the
-baseline do under these same beam loads"), not analysis runs in their own
-right.
+GET/POST /baseline wrap eat.baseline, letting the frontend compare a
+section's structural efficiency (stiffness/strength-to-weight) against a
+reference "baseline" (a built-in extrusion profile, or any history entry
+set as one) -- see that module's docstring. Neither route logs to
+history: they're derived lookups (the comparison ratios are trivial
+client-side math), not analysis runs in their own right.
 """
 
 from __future__ import annotations
@@ -583,7 +582,14 @@ class BaselineResponse(BaseModel):
     ea: float
     ei_xx: float
     ei_yy: float
+    zxx_plus: float
+    zxx_minus: float
+    zyy_plus: float
+    zyy_minus: float
     mass_per_length: float | None
+    yield_strength: float | None = Field(
+        None, description="MPa; null if the baseline's material has none, or no longer exists"
+    )
     history_entry_id: str | None = Field(
         None, description="Set when source='history': the backing entry's id"
     )
@@ -591,6 +597,10 @@ class BaselineResponse(BaseModel):
 
 def _baseline_response(info: baseline.BaselineInfo) -> BaselineResponse:
     sr = info.section_result
+    try:
+        yield_strength = get_material(info.material).yield_strength
+    except KeyError:
+        yield_strength = None
     return BaselineResponse(
         source=info.source,
         name=info.name,
@@ -601,7 +611,12 @@ def _baseline_response(info: baseline.BaselineInfo) -> BaselineResponse:
         ea=sr["ea"],
         ei_xx=sr["ei_xx"],
         ei_yy=sr["ei_yy"],
+        zxx_plus=sr["zxx_plus"],
+        zxx_minus=sr["zxx_minus"],
+        zyy_plus=sr["zyy_plus"],
+        zyy_minus=sr["zyy_minus"],
         mass_per_length=sr["mass_per_length"],
+        yield_strength=yield_strength,
         history_entry_id=info.history_entry_id,
     )
 
@@ -619,10 +634,11 @@ class BaselineSelectionRequest(BaseModel):
 
 @app.get("/baseline", response_model=BaselineResponse)
 def get_baseline() -> BaselineResponse:
-    """The currently-selected baseline's section-level properties, for the
-    frontend's always-available EIxx/EIyy/mass-per-length comparison rows
-    (the percentage arithmetic itself is trivial client-side math against
-    whatever section is currently displayed)."""
+    """The currently-selected baseline's section-level properties (plus a
+    fresh lookup of its material's yield strength), for the frontend's
+    dual-bar stiffness-to-weight / strength-to-weight comparison -- the
+    ratio arithmetic itself is trivial client-side math against whatever
+    section is currently displayed."""
     return _baseline_response(baseline.resolve_baseline())
 
 
@@ -640,43 +656,6 @@ def post_baseline(req: BaselineSelectionRequest) -> BaselineResponse:
     else:
         baseline.set_baseline_setting({"type": "builtin"})
     return _baseline_response(baseline.resolve_baseline())
-
-
-class BaselineBeamRequest(BaseModel):
-    """Same shape as BeamRequest's beam-only fields -- the frontend sends
-    whatever length/BC/loads it just ran against the *current* profile,
-    and this replays them against the baseline's profile instead, so the
-    two deflection/safety-factor figures are under identical conditions."""
-
-    length: float = Field(..., gt=0, description="mm")
-    boundary_condition: Literal["fixed_fixed", "fixed_free", "simply_supported", "fixed_pinned"]
-    point_loads: list[PointLoadModel] = Field(..., min_length=1)
-    axial_load: float | None = None
-
-
-@app.post("/baseline/beam", response_model=BeamResponse)
-def post_baseline_beam(req: BaselineBeamRequest) -> BeamResponse:
-    info = baseline.resolve_baseline()
-    try:
-        material = get_material(info.material)
-    except KeyError as exc:
-        raise HTTPException(
-            404, f"Baseline material '{info.material}' no longer exists: {_error_message(exc)}"
-        ) from exc
-    section = SectionResult(**info.section_result)
-    point_loads = [PointLoad(pl.position_fraction, pl.magnitude, axis=pl.axis) for pl in req.point_loads]
-    try:
-        result = analyze_beam(
-            section,
-            material,
-            length=req.length,
-            boundary_condition=BoundaryCondition(req.boundary_condition),
-            point_loads=point_loads,
-            axial_load=req.axial_load,
-        )
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    return BeamResponse.from_result(result)
 
 
 # Frontend static files (build step 6). Mounted last and at "/" so it acts

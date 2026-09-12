@@ -8,21 +8,31 @@ for the same reason (every function here accepts an explicit path, so
 tests never touch the real eat/baseline.json or eat/history.json a
 user's actual runs/settings live in).
 
-The percentage math itself lives client-side in app.js (a one-line
-`(current - baseline) / baseline * 100`, not duplicated here or in the
-API); what this file verifies is that the *inputs* to that arithmetic are
-correct: the built-in baseline's Area/Ixx/Iyy/Mass-per-length are
-cross-checked against the KJN figures already independently established
-in eat.verify_dxf.py's real-catalog-file check (its own geometry is too
-complex to hand-derive from scratch), and a plain 50x100mm rectangle's
-properties are confirmed against textbook composite-shape formulas. With
-both sides independently confirmed correct, the resulting relative
-percentages are reproducible with a calculator -- see
-run_hand_checkable_comparison_check()'s docstring for the actual numbers.
+The six comparison metrics (dual-bar stiffness/strength-to-weight, plus
+mass per length) themselves live client-side in app.js -- plain division,
+not duplicated here or in the API; what this file verifies is that the
+*inputs* to that arithmetic are correct: the built-in baseline's
+Area/Ixx/Iyy/Z-moduli/Mass-per-length are cross-checked against the KJN
+figures already independently established in eat.verify_dxf.py's
+real-catalog-file check (its own geometry is too complex to hand-derive
+from scratch), and a plain 50x100mm rectangle's properties are confirmed
+against textbook composite-shape formulas. With both sides independently
+confirmed correct, the six metrics are reproducible with a calculator --
+see run_hand_checkable_comparison_check()'s docstring for the actual
+numbers.
 
-The HTTP-level wiring (GET/POST /baseline, POST /baseline/beam, and the
-frontend's rendered "+X.X%" text) is covered separately in
-eat/verify_api.py and eat/verify_frontend.py.
+Also verifies the algebraic sanity check the axial metrics must satisfy:
+EA/mass-per-length reduces to E/density, and (yield*Area)/mass-per-length
+reduces to yield/density -- both pure material properties, independent of
+the cross-section's shape or area. run_axial_material_property_check()
+confirms this holds in the actual computed numbers (not just assumed):
+two differently-shaped sections in the *same* material give equal axial
+stiffness/strength-to-weight, and the same shape in two *different*
+materials gives different values.
+
+The HTTP-level wiring (GET/POST /baseline, and the frontend's rendered
+dual bars) is covered separately in eat/verify_api.py and
+eat/verify_frontend.py.
 
 Run with: python -m eat.verify_baseline
 """
@@ -131,34 +141,48 @@ def run_resolution_checks() -> list[Check]:
     return checks
 
 
-def run_hand_checkable_comparison_check() -> list[Check]:
-    """Cross-checks the two numbers a real "rectangle vs. KJN baseline"
-    comparison would combine, each independently, then confirms the
-    resulting percentages a calculator would produce.
+def _z_worst(plus: float, minus: float) -> float:
+    """Governing (worst-case, smaller) section modulus -- same convention
+    eat.beam uses for max_bending_stress."""
+    return min(plus, minus)
 
-    Baseline (KJN, 6063-T6): Area/Ixx/Iyy/Mass-per-length are checked
-    against the exact figures eat.verify_dxf.py's real-catalog-file check
-    already independently established (287.6550 mm^2, 11994.9 mm^4,
-    46266.1 mm^4, 0.7767 kg/m) -- not re-derived here, since a 246-vertex
-    T-slot profile's moments of inertia aren't hand-calculable from
-    scratch.
+
+def run_hand_checkable_comparison_check() -> list[Check]:
+    """Cross-checks the two sections' properties a real "rectangle vs. KJN
+    baseline" comparison would combine, each independently, then confirms
+    the six stiffness/strength-to-weight metrics (plus mass per length)
+    app.js's buildBaselineMetricGroups() would compute from them.
+
+    Baseline (KJN, 6063-T6, yield=214 MPa): Area/Ixx/Iyy/Z-moduli/Mass-per-
+    length are checked against the exact figures eat.verify_dxf.py's
+    real-catalog-file check already independently established (287.6550
+    mm^2, 11994.9 mm^4, 46266.1 mm^4, 0.7767 kg/m) -- not re-derived here,
+    since a 246-vertex T-slot profile's moments of inertia aren't
+    hand-calculable from scratch.
 
     Comparison profile: a plain 50x100mm rectangle in "Test Steel"
-    (E=200,000 MPa, density=7850 kg/m^3 -- eat.verify_section.py's own
-    hand-calc convention), whose Ixx/Iyy/mass are exact textbook values:
-    Ixx = 50*100^3/12 = 4,166,666.667 mm^4
-    Iyy = 100*50^3/12 = 1,041,666.667 mm^4
-    mass/length = 7850 * (50*100*1e-6) = 39.25 kg/m
+    (E=200,000 MPa, yield=250 MPa, density=7850 kg/m^3 --
+    eat.verify_beam.py/eat.verify_section.py's own hand-calc convention),
+    whose properties are exact textbook values:
+      Ixx = 50*100^3/12 = 4,166,666.667 mm^4;  Iyy = 100*50^3/12 = 1,041,666.667 mm^4
+      Zxx = Ixx/50 = 83,333.33 mm^3 (both faces, symmetric); Zyy = Iyy/25 = 41,666.67 mm^3
+      mass/length = 7850 * (50*100*1e-6) = 39.25 kg/m
 
-    With both sides independently confirmed, EIxx/EIyy/mass percentages
-    ((rect - baseline) / baseline * 100) are plain division, reproducible
-    with a calculator from the numbers above:
-      EIxx: (200000*4166666.667 - 826448688.97) / 826448688.97 * 100 = +100733.0%
-      EIyy: (200000*1041666.667 - 3187731329.51) / 3187731329.51 * 100 = +6435.5%
-      mass: (39.25 - 0.7766685396) / 0.7766685396 * 100 = +4953.6%
+    With both sides independently confirmed, each metric is plain
+    division/multiplication, reproducible with a calculator:
+      Mass per length:            rect=39.25            base=0.776669 kg/m
+      Stiffness-to-Weight Axial:  rect=200000*5000/39.25=25,477,707      base=EA/mass=25,518,519 N/(kg/m)
+      Stiffness-to-Weight Bend X: rect=200000*1041666.667/39.25=5,307,856k  base=EIyy/mass=4,104,365k N.mm^2/(kg/m)
+      Stiffness-to-Weight Bend Y: rect=200000*4166666.667/39.25=21,231,423k base=EIxx/mass=1,064,094k N.mm^2/(kg/m)
+      Strength-to-Weight Axial:   rect=250*5000/39.25=31,847              base=yield*Area/mass=79,259 N/(kg/m)
+      Strength-to-Weight Bend X:  rect=250*41666.67/39.25=265,393         base=yield*Zyy/mass=637,397 N.mm/(kg/m)
+      Strength-to-Weight Bend Y:  rect=250*83333.33/39.25=530,786         base=yield*Zxx/mass=330,502 N.mm/(kg/m)
     (The steel rectangle dwarfs the thin-walled aluminum T-slot extrusion
-    on every axis, as expected -- a solid steel bar vs. a hollow aluminum
-    profile a fraction of its size.)
+    on most axes, as expected for a solid steel bar vs. a hollow aluminum
+    profile a fraction of its size -- except strength-to-weight, where the
+    much lighter, higher-yield-per-mass KJN profile actually wins on
+    bending, illustrating exactly why a strength-to-weight comparison is
+    useful and not just a restatement of the stiffness one.)
     """
     checks: list[Check] = []
 
@@ -174,8 +198,13 @@ def run_hand_checkable_comparison_check() -> list[Check]:
             f"{sr['mass_per_length']}",
         )
     )
+    b_zxx = _z_worst(sr["zxx_plus"], sr["zxx_minus"])
+    b_zyy = _z_worst(sr["zyy_plus"], sr["zyy_minus"])
+    checks.append(Check("Builtin baseline: governing Zxx matches its own zxx_plus/minus", _rel_close(b_zxx, 1199.4901146218467), f"{b_zxx}"))
+    checks.append(Check("Builtin baseline: governing Zyy matches its own zyy_plus/minus", _rel_close(b_zyy, 2313.300042821097), f"{b_zyy}"))
+    b_yield = 214.0  # 6063-T6, materials.json
 
-    rect_material = Material(name="Test Steel", E=200_000, nu=0.3, density=7850)
+    rect_material = Material(name="Test Steel", E=200_000, nu=0.3, yield_strength=250, density=7850)
     rect = analyze_section([(0, 0), (50, 0), (50, 100), (0, 100)], rect_material, mesh_size=1.0)
     ixx_exp = 50 * 100**3 / 12
     iyy_exp = 100 * 50**3 / 12
@@ -183,19 +212,137 @@ def run_hand_checkable_comparison_check() -> list[Check]:
     checks.append(Check("Rectangle: Ixx matches the textbook formula", _rel_close(rect.ixx, ixx_exp), f"{rect.ixx}"))
     checks.append(Check("Rectangle: Iyy matches the textbook formula", _rel_close(rect.iyy, iyy_exp), f"{rect.iyy}"))
     checks.append(Check("Rectangle: Mass/length matches the textbook formula", _rel_close(rect.mass_per_length, mass_exp), f"{rect.mass_per_length}"))
+    r_zxx = _z_worst(rect.zxx_plus, rect.zxx_minus)
+    r_zyy = _z_worst(rect.zyy_plus, rect.zyy_minus)
+    checks.append(Check("Rectangle: governing Zxx matches Ixx/50 (symmetric section)", _rel_close(r_zxx, ixx_exp / 50), f"{r_zxx}"))
+    checks.append(Check("Rectangle: governing Zyy matches Iyy/25 (symmetric section)", _rel_close(r_zyy, iyy_exp / 25), f"{r_zyy}"))
 
-    eixx_pct = (rect.ei_xx - sr["ei_xx"]) / sr["ei_xx"] * 100
-    eiyy_pct = (rect.ei_yy - sr["ei_yy"]) / sr["ei_yy"] * 100
-    mass_pct = (rect.mass_per_length - sr["mass_per_length"]) / sr["mass_per_length"] * 100
-    checks.append(Check("Rectangle vs KJN baseline: EIxx relative % matches the hand-computed ratio (+100733.0%)", _rel_close(eixx_pct, 100733.03954023428, 1e-3), f"{eixx_pct}"))
-    checks.append(Check("Rectangle vs KJN baseline: EIyy relative % matches the hand-computed ratio (+6435.5%)", _rel_close(eiyy_pct, 6435.473407201778, 1e-3), f"{eiyy_pct}"))
-    checks.append(Check("Rectangle vs KJN baseline: Mass relative % matches the hand-computed ratio (+4953.6%)", _rel_close(mass_pct, 4953.635881661107, 1e-3), f"{mass_pct}"))
+    metrics = {
+        "Mass per length": (rect.mass_per_length, sr["mass_per_length"], 39.24999999999991, 0.7766685396237651),
+        "Stiffness-to-Weight Axial": (rect.ea / rect.mass_per_length, sr["ea"] / sr["mass_per_length"], 25477707.006369427, 25518518.51851852),
+        "Stiffness-to-Weight Bending (X, uses Iyy)": (rect.ei_yy / rect.mass_per_length, sr["ei_yy"] / sr["mass_per_length"], 5307855626.326859, 4104365204.5655146),
+        "Stiffness-to-Weight Bending (Y, uses Ixx)": (rect.ei_xx / rect.mass_per_length, sr["ei_xx"] / sr["mass_per_length"], 21231422505.308517, 1064094458.3319955),
+        "Strength-to-Weight Axial": (
+            rect_material.yield_strength * rect.area / rect.mass_per_length,
+            b_yield * sr["area"] / sr["mass_per_length"],
+            31847.133757961783,
+            79259.25925925926,
+        ),
+        "Strength-to-Weight Bending (X, uses Zyy)": (
+            rect_material.yield_strength * r_zyy / rect.mass_per_length,
+            b_yield * b_zyy / sr["mass_per_length"],
+            265392.78131634195,
+            637397.0154675323,
+        ),
+        "Strength-to-Weight Bending (Y, uses Zxx)": (
+            rect_material.yield_strength * r_zxx / rect.mass_per_length,
+            b_yield * b_zxx / sr["mass_per_length"],
+            530785.5626327129,
+            330502.48778381286,
+        ),
+    }
+    for label, (rect_val, base_val, expected_rect, expected_base) in metrics.items():
+        checks.append(
+            Check(
+                f"{label}: profile value matches hand calc",
+                _rel_close(rect_val, expected_rect, 1e-3),
+                f"{rect_val} vs expected {expected_rect}",
+            )
+        )
+        checks.append(
+            Check(
+                f"{label}: baseline value matches hand calc",
+                _rel_close(base_val, expected_base, 1e-3),
+                f"{base_val} vs expected {expected_base}",
+            )
+        )
+
+    return checks
+
+
+def run_axial_material_property_check() -> list[Check]:
+    """The axial metrics algebraically reduce to pure material properties:
+    EA/mass = E/density, and (yield*Area)/mass = yield/density -- both
+    independent of the cross-section's shape or area (Area cancels: mass =
+    density*Area*1e-6, so EA/mass = E/(density*1e-6) regardless of Area).
+
+    Verified in the actual computed numbers, not just asserted from the
+    algebra: a rectangle and an L-angle (very different shapes) in the
+    *same* material must give equal axial stiffness/strength-to-weight,
+    while the same rectangle in two *different* materials must not.
+    """
+    checks: list[Check] = []
+
+    steel = Material(name="Test Steel", E=200_000, nu=0.3, yield_strength=250, density=7850)
+    alum = Material(name="Test Aluminum", E=69_000, nu=0.33, yield_strength=241, density=2700)
+
+    rect_steel = analyze_section([(0, 0), (50, 0), (50, 100), (0, 100)], steel, mesh_size=1.0)
+    angle_steel = analyze_section([(0, 0), (50, 0), (50, 10), (10, 10), (10, 60), (0, 60)], steel, mesh_size=0.5)
+    rect_alum = analyze_section([(0, 0), (50, 0), (50, 100), (0, 100)], alum, mesh_size=1.0)
+
+    def axial_stiffness(section, material):
+        return section.ea / section.mass_per_length
+
+    def axial_strength(section, material):
+        return material.yield_strength * section.area / section.mass_per_length
+
+    checks.append(
+        Check(
+            "Same material, different shape: axial stiffness-to-weight is equal (EA/mass = E/density)",
+            _rel_close(axial_stiffness(rect_steel, steel), axial_stiffness(angle_steel, steel), 1e-6),
+            f"rect={axial_stiffness(rect_steel, steel)}, angle={axial_stiffness(angle_steel, steel)}",
+        )
+    )
+    checks.append(
+        Check(
+            "Same material, different shape: axial strength-to-weight is equal (yield*Area/mass = yield/density)",
+            _rel_close(axial_strength(rect_steel, steel), axial_strength(angle_steel, steel), 1e-6),
+            f"rect={axial_strength(rect_steel, steel)}, angle={axial_strength(angle_steel, steel)}",
+        )
+    )
+
+    expected_stiffness = steel.E / steel.density * 1e6
+    expected_strength = steel.yield_strength / steel.density * 1e6
+    checks.append(
+        Check(
+            "Same-material axial stiffness-to-weight equals E/density (unit-converted)",
+            _rel_close(axial_stiffness(rect_steel, steel), expected_stiffness, 1e-6),
+            f"{axial_stiffness(rect_steel, steel)} vs E/density={expected_stiffness}",
+        )
+    )
+    checks.append(
+        Check(
+            "Same-material axial strength-to-weight equals yield/density (unit-converted)",
+            _rel_close(axial_strength(rect_steel, steel), expected_strength, 1e-6),
+            f"{axial_strength(rect_steel, steel)} vs yield/density={expected_strength}",
+        )
+    )
+
+    checks.append(
+        Check(
+            "Different materials, same shape: axial stiffness-to-weight correctly diverges",
+            not _rel_close(axial_stiffness(rect_steel, steel), axial_stiffness(rect_alum, alum), 1e-3),
+            f"steel={axial_stiffness(rect_steel, steel)}, alum={axial_stiffness(rect_alum, alum)}",
+        )
+    )
+    checks.append(
+        Check(
+            "Different materials, same shape: axial strength-to-weight correctly diverges",
+            not _rel_close(axial_strength(rect_steel, steel), axial_strength(rect_alum, alum), 1e-3),
+            f"steel={axial_strength(rect_steel, steel)}, alum={axial_strength(rect_alum, alum)}",
+        )
+    )
 
     return checks
 
 
 def main() -> int:
-    checks = run_setting_persistence_checks() + run_resolution_checks() + run_hand_checkable_comparison_check()
+    checks = (
+        run_setting_persistence_checks()
+        + run_resolution_checks()
+        + run_hand_checkable_comparison_check()
+        + run_axial_material_property_check()
+    )
     return _report(checks)
 
 

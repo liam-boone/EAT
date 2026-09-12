@@ -21,7 +21,6 @@ const state = {
   viewOriginY: 0,        // world y mapped to the bottom margin
   pixelsPerMm: 1,        // recomputed on layout/resize
   lastSectionResult: null, // currently-displayed section result, for the baseline comparison
-  lastBeamResult: null,    // currently-displayed beam result, for the baseline comparison
 };
 
 /* ------------------------------------------------------------------
@@ -75,7 +74,7 @@ const historyEmptyHint = document.getElementById("history-empty-hint");
 const baselineSectionEl = document.getElementById("baseline-section");
 const baselineNameEl = document.getElementById("baseline-name");
 const btnUseBuiltinBaseline = document.getElementById("btn-use-builtin-baseline");
-const baselineComparisonGrid = document.getElementById("baseline-comparison-grid");
+const baselineMetricsEl = document.getElementById("baseline-metrics");
 
 /* ------------------------------------------------------------------
    API helper — surfaces the API's own error text, never swallows it
@@ -541,7 +540,6 @@ materialSelect.addEventListener("change", () => {
 function invalidateSection() {
   state.sectionId = null;
   state.lastSectionResult = null;
-  state.lastBeamResult = null;
   sectionResultsEl.hidden = true;
   beamInputsEl.hidden = true;
   beamResultsEl.hidden = true;
@@ -566,7 +564,6 @@ async function computeSection() {
     sectionResultsEl.hidden = false;
     beamInputsEl.hidden = false;
     beamResultsEl.hidden = true;
-    refreshBaselineComparison(body, null);
   } catch (err) {
     showError(`Section analysis failed: ${err.message}`);
     sectionResultsEl.hidden = true;
@@ -605,6 +602,7 @@ function renderSectionResults(r) {
   resultRow(sectionResultGridSecondary, "GJ", fmtNum(r.gj), "N·mm²");
 
   renderSolidFillComparison(r);
+  refreshBaselineComparison(r);
 }
 
 /** Shows what the same outer boundary's properties would be with its
@@ -691,7 +689,6 @@ dxfFileInput.addEventListener("change", async () => {
     sectionResultsEl.hidden = false;
     beamInputsEl.hidden = false;
     beamResultsEl.hidden = true;
-    refreshBaselineComparison(body, null);
   } catch (err) {
     showError(`DXF import failed: ${err.message}`);
   }
@@ -873,7 +870,6 @@ btnAnalyzeBeam.addEventListener("click", async () => {
     });
     renderBeamResults(body);
     beamResultsEl.hidden = false;
-    refreshBaselineComparison(state.lastSectionResult, body);
   } catch (err) {
     showError(`Beam analysis failed: ${err.message}`);
     beamResultsEl.hidden = true;
@@ -903,7 +899,6 @@ function summaryTile(grid, label, value, unit, opts = {}) {
 }
 
 function renderBeamResults(r) {
-  state.lastBeamResult = r;
   beamSummaryGrid.innerHTML = "";
   summaryTile(
     beamSummaryGrid,
@@ -1157,7 +1152,7 @@ function renderHistoryRow(summary, isCurrentBaseline) {
         body: JSON.stringify({ type: "history", entry_id: summary.id }),
       });
       await openHistory(); // re-render the list so the "baseline" tag moves
-      refreshBaselineComparison(state.lastSectionResult, state.lastBeamResult);
+      refreshBaselineComparison(state.lastSectionResult);
     } catch (err) {
       showError(`Could not set baseline: ${err.message}`);
     }
@@ -1174,7 +1169,7 @@ function renderHistoryRow(summary, isCurrentBaseline) {
       await apiFetch(`/history/${summary.id}`, { method: "DELETE" });
       li.remove();
       if (historyListEl.children.length === 0) historyEmptyHint.hidden = false;
-      if (isCurrentBaseline) refreshBaselineComparison(state.lastSectionResult, state.lastBeamResult);
+      if (isCurrentBaseline) refreshBaselineComparison(state.lastSectionResult);
     } catch (err) {
       showError(`Could not delete history entry: ${err.message}`);
     }
@@ -1241,15 +1236,7 @@ function loadHistoryEntry(entry) {
     beamResultsEl.hidden = false;
   } else {
     beamResultsEl.hidden = true;
-    state.lastBeamResult = null;
   }
-
-  // Exactly one call, after section (and beam, if present) rendering has
-  // fully settled -- calling this from inside renderSectionResults too
-  // (like renderSolidFillComparison does) would race a second call from
-  // the beam branch above and could let a stale section-only comparison
-  // clobber the correct final one.
-  refreshBaselineComparison(state.lastSectionResult, state.lastBeamResult);
 }
 
 btnOpenHistory.addEventListener("click", openHistory);
@@ -1265,37 +1252,171 @@ document.addEventListener("keydown", (ev) => {
    Baseline comparison
 ------------------------------------------------------------------ */
 
-function currentBeamRequestPayload() {
-  return {
-    length: parseFloat(inputLength.value),
-    boundary_condition: inputBc.value,
-    point_loads: state.pointLoads.filter(
-      (l) => Number.isFinite(l.position_fraction) && Number.isFinite(l.magnitude)
-    ),
-    axial_load: inputAxial.value === "" ? null : parseFloat(inputAxial.value),
-  };
+/** Governing (worst-case, smaller) section modulus for a bending axis --
+ * same convention eat.beam uses for max_bending_stress: the fibre
+ * furthest from the neutral axis on the side with less material governs
+ * the section's actual capacity. */
+function zWorst(plus, minus) {
+  return Math.min(plus, minus);
 }
 
-/** Percentage a calculator would give for (current vs baseline): positive
- * means the current value is higher. Shown alone, per spec -- not next to
- * the raw duplicated numbers (those already exist in the results panel
- * above and, for holes, in the solid-fill comparison). */
-function pctVsBaseline(currentVal, baselineVal) {
-  const pct = baselineVal !== 0 ? ((currentVal - baselineVal) / baselineVal) * 100 : 0;
-  const sign = pct >= 0 ? "+" : "";
-  return `${sign}${fmtNum(pct, { digits: 1 })}%`;
+/** Builds the six stiffness/strength-to-weight metrics (plus mass per
+ * length) comparing `sectionResult`/`material` against baseline response
+ * `b`. Strength metrics need a yield strength on *both* sides; skipped
+ * (not shown with a placeholder) when either is missing, since there's
+ * nothing meaningful to compare otherwise. Grouped to match the section
+ * headings in the UI. */
+function buildBaselineMetricGroups(sectionResult, material, b) {
+  const groups = [];
+  const massKnown = sectionResult.mass_per_length !== null && b.mass_per_length !== null;
+
+  if (massKnown) {
+    groups.push({
+      title: null,
+      metrics: [
+        {
+          label: "Mass Per Length",
+          unit: "kg/m",
+          profile: sectionResult.mass_per_length,
+          baseline: b.mass_per_length,
+        },
+      ],
+    });
+  }
+
+  if (massKnown) {
+    groups.push({
+      title: "Stiffness-to-Weight",
+      metrics: [
+        {
+          label: "Axial",
+          unit: "N/(kg/m)",
+          profile: sectionResult.ea / sectionResult.mass_per_length,
+          baseline: b.ea / b.mass_per_length,
+        },
+        {
+          label: "Bending (X)",
+          unit: "N·mm²/(kg/m)",
+          profile: sectionResult.ei_yy / sectionResult.mass_per_length,
+          baseline: b.ei_yy / b.mass_per_length,
+        },
+        {
+          label: "Bending (Y)",
+          unit: "N·mm²/(kg/m)",
+          profile: sectionResult.ei_xx / sectionResult.mass_per_length,
+          baseline: b.ei_xx / b.mass_per_length,
+        },
+      ],
+    });
+  }
+
+  const yieldStrength = material ? material.yield_strength : null;
+  const strengthKnown =
+    massKnown &&
+    yieldStrength !== null &&
+    yieldStrength !== undefined &&
+    b.yield_strength !== null &&
+    b.yield_strength !== undefined;
+
+  if (strengthKnown) {
+    const zWorstYyProfile = zWorst(sectionResult.zyy_plus, sectionResult.zyy_minus);
+    const zWorstXxProfile = zWorst(sectionResult.zxx_plus, sectionResult.zxx_minus);
+    const zWorstYyBaseline = zWorst(b.zyy_plus, b.zyy_minus);
+    const zWorstXxBaseline = zWorst(b.zxx_plus, b.zxx_minus);
+    groups.push({
+      title: "Strength-to-Weight",
+      metrics: [
+        {
+          label: "Axial",
+          unit: "N/(kg/m)",
+          profile: (yieldStrength * sectionResult.area) / sectionResult.mass_per_length,
+          baseline: (b.yield_strength * b.area) / b.mass_per_length,
+        },
+        {
+          label: "Bending (X)",
+          unit: "N·mm/(kg/m)",
+          profile: (yieldStrength * zWorstYyProfile) / sectionResult.mass_per_length,
+          baseline: (b.yield_strength * zWorstYyBaseline) / b.mass_per_length,
+        },
+        {
+          label: "Bending (Y)",
+          unit: "N·mm/(kg/m)",
+          profile: (yieldStrength * zWorstXxProfile) / sectionResult.mass_per_length,
+          baseline: (b.yield_strength * zWorstXxBaseline) / b.mass_per_length,
+        },
+      ],
+    });
+  }
+
+  return groups;
+}
+
+/** One metric's dual bars: profile on top, baseline below, both widths
+ * normalized to their own shared max (not a single scale across metrics
+ * -- these are different units/magnitudes and aren't meant to be visually
+ * compared to each other). Raw values are labeled directly, not a
+ * percentage. */
+function renderBaselineMetric(metric) {
+  const wrap = document.createElement("div");
+  wrap.className = "baseline-metric";
+
+  const label = document.createElement("div");
+  label.className = "baseline-metric__label";
+  label.textContent = metric.label;
+  wrap.appendChild(label);
+
+  const barMax = Math.max(metric.profile, metric.baseline, Number.MIN_VALUE);
+  wrap.appendChild(baselineMetricRow("Profile", metric.profile, barMax, metric.unit, "profile"));
+  wrap.appendChild(baselineMetricRow("Baseline", metric.baseline, barMax, metric.unit, "baseline"));
+  return wrap;
+}
+
+function baselineMetricRow(rowLabel, value, barMax, unit, variant) {
+  const row = document.createElement("div");
+  row.className = "baseline-metric__row";
+
+  const rowLabelEl = document.createElement("span");
+  rowLabelEl.className = "baseline-metric__row-label";
+  rowLabelEl.textContent = rowLabel;
+
+  const track = document.createElement("div");
+  track.className = "baseline-metric__bar-track";
+  const bar = document.createElement("div");
+  bar.className = `baseline-metric__bar baseline-metric__bar--${variant}`;
+  const widthPct = barMax > 0 ? Math.max(0, Math.min(100, (value / barMax) * 100)) : 0;
+  bar.style.width = `${widthPct}%`;
+  track.appendChild(bar);
+
+  const valueEl = document.createElement("span");
+  valueEl.className = "baseline-metric__row-value";
+  valueEl.textContent = `${fmtNum(value)} ${unit}`;
+
+  row.appendChild(rowLabelEl);
+  row.appendChild(track);
+  row.appendChild(valueEl);
+  return row;
+}
+
+function renderBaselineMetrics(groups) {
+  baselineMetricsEl.innerHTML = "";
+  groups.forEach((group) => {
+    if (group.title) {
+      const h = document.createElement("h4");
+      h.className = "panel__subtitle panel__subtitle--sub baseline-metric-group__title";
+      h.textContent = group.title;
+      baselineMetricsEl.appendChild(h);
+    }
+    group.metrics.forEach((metric) => baselineMetricsEl.appendChild(renderBaselineMetric(metric)));
+  });
 }
 
 /** Refreshes the "Compared to Baseline" section for whatever's currently
  * displayed. Always a fresh, live lookup against the current baseline
- * setting -- like the solid-fill comparison, this was never part of any
- * *frozen* stored result, so recomputing it (including for a reloaded
- * history entry) doesn't touch the primary numbers those flows are about
- * reproducing exactly. Call this once, after section (and beam, if
- * present) rendering has fully settled -- see loadHistoryEntry's comment
- * for why splitting it across two calls would race.
- */
-async function refreshBaselineComparison(sectionResult, beamResult) {
+ * setting and the currently-selected material -- like the solid-fill
+ * comparison, this was never part of any *frozen* stored result, so
+ * recomputing it (including for a reloaded history entry) doesn't touch
+ * the primary numbers those flows are about reproducing exactly. */
+async function refreshBaselineComparison(sectionResult) {
   if (!sectionResult) {
     baselineSectionEl.hidden = true;
     return;
@@ -1303,40 +1424,8 @@ async function refreshBaselineComparison(sectionResult, beamResult) {
   try {
     const b = await apiFetch("/baseline");
     baselineNameEl.textContent = b.name;
-
-    const rows = [
-      ["EIxx", sectionResult.ei_xx, b.ei_xx],
-      ["EIyy", sectionResult.ei_yy, b.ei_yy],
-    ];
-    if (sectionResult.mass_per_length !== null && b.mass_per_length !== null) {
-      rows.push(["Mass Per Length", sectionResult.mass_per_length, b.mass_per_length]);
-    }
-
-    if (beamResult) {
-      try {
-        const baselineBeam = await apiFetch("/baseline/beam", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(currentBeamRequestPayload()),
-        });
-        rows.push(["Max Deflection", Math.abs(beamResult.max_deflection), Math.abs(baselineBeam.max_deflection)]);
-        if (
-          Number.isFinite(beamResult.safety_factor) &&
-          Number.isFinite(baselineBeam.safety_factor)
-        ) {
-          rows.push(["Safety Factor", beamResult.safety_factor, baselineBeam.safety_factor]);
-        }
-      } catch (err) {
-        // Beam-vs-baseline comparison is best-effort (e.g. the baseline's
-        // material may have been deleted) -- the section-level rows above
-        // still stand on their own.
-      }
-    }
-
-    baselineComparisonGrid.innerHTML = "";
-    rows.forEach(([label, currentVal, baselineVal]) => {
-      resultRow(baselineComparisonGrid, label, pctVsBaseline(currentVal, baselineVal));
-    });
+    const material = state.materials.find((m) => m.name === state.selectedMaterial) || null;
+    renderBaselineMetrics(buildBaselineMetricGroups(sectionResult, material, b));
     baselineSectionEl.hidden = false;
   } catch (err) {
     baselineSectionEl.hidden = true;
@@ -1350,7 +1439,7 @@ btnUseBuiltinBaseline.addEventListener("click", async () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ type: "builtin" }),
     });
-    refreshBaselineComparison(state.lastSectionResult, state.lastBeamResult);
+    refreshBaselineComparison(state.lastSectionResult);
   } catch (err) {
     showError(`Could not reset baseline: ${err.message}`);
   }

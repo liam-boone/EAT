@@ -24,16 +24,17 @@ user's actual runs live in -- to its pre-test state, the same discipline
 check_materials() already applies to materials.json.
 
 Also confirms the baseline-comparison endpoints (build step 10): GET
-/baseline defaults to the built-in profile, POST /baseline selects a
-history entry as the baseline (validating entry_id and rejecting an
-unknown one), POST /baseline/beam replays a beam analysis against
-whatever's currently selected, and deleting the referenced history entry
-falls back to the built-in baseline rather than erroring -- eat.baseline's
-own setting-persistence/resolution logic (plus the built-in profile's
-hand-checkable figures) is unit-tested in isolation in
-eat/verify_baseline.py; this file only checks the HTTP wiring. main()
-restores eat/baseline.json's setting to its pre-test state, same
-restore-to-original-state discipline as the other two shared JSON files.
+/baseline defaults to the built-in profile and includes the Z-moduli and
+yield strength the frontend's dual-bar stiffness/strength-to-weight
+comparison needs, POST /baseline selects a history entry as the baseline
+(validating entry_id and rejecting an unknown one), and deleting the
+referenced history entry falls back to the built-in baseline rather than
+erroring -- eat.baseline's own setting-persistence/resolution logic (plus
+the built-in profile's hand-checkable figures and the six comparison
+metrics' formulas) is unit-tested in isolation in eat/verify_baseline.py;
+this file only checks the HTTP wiring. main() restores eat/baseline.json's
+setting to its pre-test state, same restore-to-original-state discipline
+as the other two shared JSON files.
 
 Run with: python -m eat.verify_api
 """
@@ -590,12 +591,17 @@ def check_baseline() -> list[Check]:
             f"{body}",
         )
     )
+    checks.append(
+        Check(
+            "GET /baseline: includes Z-moduli and yield strength for the strength-to-weight metrics",
+            _rel_close(body["zxx_plus"], 1199.4901146218467, 1e-6)
+            and _rel_close(body["zyy_minus"], 2313.300042821097, 1e-6)
+            and _rel_close(body["yield_strength"], 214.0, 1e-6),
+            f"{body}",
+        )
+    )
 
     # --- Select a history entry as the baseline ---
-    # Uses a materials.json-registered material (not the usual inline
-    # "Test Steel"): POST /baseline/beam looks the baseline's material up
-    # by *name* from materials.json to run analyze_beam, so an inline spec
-    # (never persisted anywhere) wouldn't resolve.
     resp = client.post(
         "/section", json={"vertices": rectangle, "material_name": "6061-T6 Aluminum (Extruded)", "mesh_size": 1.0}
     )
@@ -609,7 +615,8 @@ def check_baseline() -> list[Check]:
             "POST /baseline: response reflects the newly-selected entry",
             body["source"] == "history"
             and body["history_entry_id"] == entry_id
-            and _rel_close(body["area"], 5000.0, 1e-6),
+            and _rel_close(body["area"], 5000.0, 1e-6)
+            and _rel_close(body["yield_strength"], 241.0, 1e-6),
             f"{body}",
         )
     )
@@ -620,29 +627,6 @@ def check_baseline() -> list[Check]:
             "GET /baseline: selection persists across a separate request",
             resp.json()["history_entry_id"] == entry_id,
             resp.text,
-        )
-    )
-
-    # --- POST /baseline/beam replays a beam analysis against it ---
-    resp = client.post(
-        "/baseline/beam",
-        json={
-            "length": 1000,
-            "boundary_condition": "simply_supported",
-            "point_loads": [{"position_fraction": 0.5, "magnitude": -1000}],
-        },
-    )
-    checks.append(Check("POST /baseline/beam: 200 OK", resp.status_code == 200, resp.text))
-    body = resp.json()
-    # |P|*L/4 (material-independent) and |P|*L^3/(48*E*Ixx) for 6061-T6's
-    # E=69000 MPa (not 6063-T6's 68900 -- easy to mix up) and this
-    # rectangle's textbook Ixx=4,166,666.667 mm^4.
-    expected_deflection = 1000.0 * 1000.0**3 / (48 * 69000.0 * 4166666.6666666665)
-    checks.append(
-        Check(
-            "POST /baseline/beam: matches the closed-form result for this rectangle+material",
-            _rel_close(abs(body["max_moment"]), 250000.0, 1e-6) and _rel_close(abs(body["max_deflection"]), expected_deflection, 1e-3),
-            f"max_moment={body.get('max_moment')}, max_deflection={body.get('max_deflection')}, expected_deflection={expected_deflection}",
         )
     )
 

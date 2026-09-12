@@ -31,21 +31,24 @@ renders what comes back, for three flows:
    swept up at the end, restoring eat/history.json -- the real file a
    user's actual runs live in -- to its pre-test state.
 5. Import eat/fixtures/rectangle_50x100.dxf (exact vertices, unlike flow
-   1's mouse clicks -- needed for a tight percentage match) with 6061-T6
-   -> confirm the "Compared to Baseline" section's EIxx/EIyy/Mass-per-
-   length percentages against the default built-in KJN baseline match
-   hand-computed ratios (both sides' numbers independently known: the
-   rectangle's from the textbook Ixx/Iyy formula, the KJN baseline's from
-   eat/verify_baseline.py's own established figures) -> set that same
-   rectangle entry as the baseline from the History panel -> confirm the
-   percentages drop to ~0% (comparing it against itself) -> kill and
-   relaunch the server process (a real "simulated restart") -> confirm
-   GET /baseline still reports that entry, and that a fresh analysis
-   against the restarted server still compares correctly. eat.baseline's
-   own setting-persistence/resolution logic is unit-tested in isolation
-   in eat/verify_baseline.py; this only checks the UI wiring end-to-end.
-   The baseline selection is restored to its pre-test state afterward,
-   same as the history sweep above.
+   1's mouse clicks -- needed for a tight match) with 6061-T6 -> confirm
+   the "Compared to Baseline" section's seven dual-bar values (Mass Per
+   Length, Stiffness-to-Weight and Strength-to-Weight each for Axial/
+   Bending X/Bending Y) against the default built-in KJN baseline match
+   hand-computed figures (both sides' numbers independently known: the
+   rectangle's from the textbook Ixx/Iyy/Z formulas, the KJN baseline's
+   from eat/verify_baseline.py's own established figures) -> set that
+   same rectangle entry as the baseline from the History panel -> confirm
+   every profile/baseline bar pair reads equal (comparing it against
+   itself) -> kill and relaunch the server process (a real "simulated
+   restart") -> confirm GET /baseline still reports that entry, and that
+   a fresh analysis against the restarted server still compares
+   correctly. eat.baseline's own setting-persistence/resolution logic and
+   the six metrics' formulas (plus the algebraic sanity check that the
+   axial ones reduce to pure material properties) are unit-tested in
+   isolation in eat/verify_baseline.py; this only checks the UI wiring
+   end-to-end. The baseline selection is restored to its pre-test state
+   afterward, same as the history sweep above.
 
 Also checks two smaller additions to the sketch canvas / results panel:
 
@@ -211,15 +214,12 @@ def main() -> int:
                         history_entry_captures.append(resp.json())
                     except Exception:
                         pass
-                # Longer/more-specific suffixes first: "/baseline/beam" and
-                # "/section/from-dxf" etc. would otherwise also match the
-                # shorter "/beam"/"/section" checks below (endswith), which
-                # previously let the frontend's fire-and-forget baseline
-                # comparison silently clobber the real /beam capture.
+                # Longer/more-specific suffixes first: "/section/from-dxf"
+                # etc. would otherwise also match the shorter "/section"
+                # check below (endswith).
                 for key in (
                     "/section/from-dxf",
                     "/section/to-dxf",
-                    "/baseline/beam",
                     "/baseline",
                     "/section",
                     "/beam",
@@ -617,18 +617,10 @@ def main() -> int:
             checks.append(
                 Check(
                     "History: loading an entry issues no new POST /section or /beam (frozen, not recomputed)",
-                    # Excludes /baseline and /baseline/beam: loadHistoryEntry
-                    # also (deliberately) triggers a fresh baseline-comparison
-                    # lookup, which is never part of the "frozen, not
-                    # recomputed" guarantee this check is about -- see
-                    # refreshBaselineComparison's own docstring in app.js.
-                    all(
-                        not (
-                            (u.endswith("/section") and "/baseline" not in u)
-                            or (u.endswith("/beam") and "/baseline" not in u)
-                        )
-                        for u in new_posts
-                    ),
+                    # (loadHistoryEntry also triggers a fresh GET /baseline
+                    # for the baseline comparison, but that's a GET, so it
+                    # never lands in post_log regardless.)
+                    all(not (u.endswith("/section") or u.endswith("/beam")) for u in new_posts),
                     f"new POSTs={new_posts}",
                 )
             )
@@ -686,15 +678,16 @@ def main() -> int:
             # --- Flow 5: baseline comparison ---
             # Import the exact rectangle_50x100.dxf fixture (not mouse
             # clicks -- flow 1's own comment notes those aren't precise
-            # enough for a tight percentage match) with 6061-T6 (already
-            # selected, unchanged since flow 1): a hand-checkable case
-            # against the built-in KJN baseline, geometry and material both
-            # fully known on both sides.
+            # enough for a tight match) with 6061-T6 (already selected,
+            # unchanged since flow 1): a hand-checkable case against the
+            # built-in KJN baseline, geometry and material both fully known
+            # on both sides.
             page.click("#btn-clear")
             captured.pop("/section/from-dxf", None)
             page.set_input_files("#dxf-file-input", str(PROJECT_ROOT / "eat" / "fixtures" / "rectangle_50x100.dxf"))
             page.wait_for_selector("#section-results:not([hidden])", timeout=5000)
             page.wait_for_selector("#baseline-section:not([hidden])", timeout=5000)
+            page.wait_for_selector("#baseline-metrics .baseline-metric", timeout=5000)
 
             baseline_name_builtin = page.locator("#baseline-name").inner_text()
             checks.append(
@@ -705,27 +698,63 @@ def main() -> int:
                 )
             )
 
-            def read_baseline_pcts():
-                labels = page.locator("#baseline-comparison-grid dt").all_inner_texts()
-                values = page.locator("#baseline-comparison-grid dd").all_inner_texts()
-                return dict(zip(labels, (float(v.replace("%", "").replace(",", "")) for v in values)))
+            def read_baseline_metrics():
+                """{(group, label): (profile_value, baseline_value)} read
+                from the dual-bar DOM structure -- group titles and metric
+                blocks are siblings in #baseline-metrics, in document order,
+                so a group applies to every metric until the next title."""
+                raw = page.evaluate(
+                    """
+                    () => {
+                        const container = document.getElementById('baseline-metrics');
+                        const out = [];
+                        let group = null;
+                        for (const child of container.children) {
+                            if (child.classList.contains('baseline-metric-group__title')) {
+                                group = child.textContent;
+                            } else if (child.classList.contains('baseline-metric')) {
+                                const label = child.querySelector('.baseline-metric__label').textContent;
+                                const values = [...child.querySelectorAll('.baseline-metric__row-value')].map(e => e.textContent);
+                                out.push({ group, label, profile: values[0], baseline: values[1] });
+                            }
+                        }
+                        return out;
+                    }
+                    """
+                )
 
-            pcts_vs_builtin = read_baseline_pcts()
-            # E=69000 MPa (6061-T6) * Ixx=4,166,666.667 / Iyy=1,041,666.667
-            # (textbook, 50x100mm) vs the built-in KJN baseline's own
-            # already-cross-checked EIxx=826,448,688.97, EIyy=3,187,731,329.51
-            # (eat/verify_baseline.py); mass = 2700 * 0.005 = 13.5 kg/m vs
-            # the baseline's 0.7766685396 kg/m.
-            expected_pcts = {"EIxx": 34687.398641379827, "EIyy": 2154.738325484663, "Mass Per Length": 1638.1932331828054}
-            pct_matches = all(
-                label in pcts_vs_builtin and _rel_close(pcts_vs_builtin[label], expected, 5e-3)
-                for label, expected in expected_pcts.items()
+                def parse(text):
+                    return float(text.split(" ", 1)[0].replace(",", ""))
+
+                return {(m["group"], m["label"]): (parse(m["profile"]), parse(m["baseline"])) for m in raw}
+
+            metrics_vs_builtin = read_baseline_metrics()
+            # 6061-T6 (E=69000 MPa, yield=241 MPa) 50x100mm rectangle
+            # (textbook Ixx/Iyy/Z, mass=2700*0.005=13.5 kg/m) vs the
+            # built-in KJN baseline's own already-cross-checked figures
+            # (eat/verify_baseline.py: ei_xx=826,448,688.97,
+            # ei_yy=3,187,731,329.51, governing Zxx=1199.49, Zyy=2313.30,
+            # mass=0.7766685396, yield=214 MPa for 6063-T6).
+            expected = {
+                (None, "Mass Per Length"): (13.499999999999968, 0.7766685396237651),
+                ("Stiffness-to-Weight", "Axial"): (25555555.555555556, 25518518.51851852),
+                ("Stiffness-to-Weight", "Bending (X)"): (5324074074.073969, 4104365204.5655146),
+                ("Stiffness-to-Weight", "Bending (Y)"): (21296296296.296963, 1064094458.3319955),
+                ("Strength-to-Weight", "Axial"): (89259.25925925927, 79259.25925925926),
+                ("Strength-to-Weight", "Bending (X)"): (743827.1604938096, 637397.0154675323),
+                ("Strength-to-Weight", "Bending (Y)"): (1487654.3209877005, 330502.48778381286),
+            }
+            metrics_match = all(
+                key in metrics_vs_builtin
+                and _rel_close(metrics_vs_builtin[key][0], exp_profile, 5e-3)
+                and _rel_close(metrics_vs_builtin[key][1], exp_baseline, 5e-3)
+                for key, (exp_profile, exp_baseline) in expected.items()
             )
             checks.append(
                 Check(
-                    "Baseline: rectangle-vs-KJN-baseline percentages match the hand-computed ratios",
-                    pct_matches,
-                    f"{pcts_vs_builtin} vs expected {expected_pcts}",
+                    "Baseline: all 7 rectangle-vs-KJN-baseline dual-bar values match hand-computed figures",
+                    metrics_match,
+                    f"{metrics_vs_builtin} vs expected {expected}",
                 )
             )
 
@@ -746,12 +775,13 @@ def main() -> int:
                 "document.getElementById('baseline-name').textContent.indexOf('KJN') === -1",
                 timeout=3000,
             )
-            pcts_vs_self = read_baseline_pcts()
+            metrics_vs_self = read_baseline_metrics()
             checks.append(
                 Check(
-                    "Baseline: comparing the rectangle against itself (now the baseline) reads ~0%",
-                    all(abs(pcts_vs_self.get(label, 999)) < 0.5 for label in expected_pcts),
-                    f"{pcts_vs_self}",
+                    "Baseline: comparing the rectangle against itself (now the baseline) reads equal bars",
+                    len(metrics_vs_self) == len(expected)
+                    and all(_rel_close(profile, base, 1e-2) for profile, base in metrics_vs_self.values()),
+                    f"{metrics_vs_self}",
                 )
             )
 
@@ -779,8 +809,8 @@ def main() -> int:
             )
 
             # And a fresh page load against the restarted server still
-            # produces the correct (self-comparison, ~0%) figures -- not
-            # just that the raw setting file survived, but that it's
+            # produces the correct (self-comparison, equal bars) figures --
+            # not just that the raw setting file survived, but that it's
             # actually wired up correctly end-to-end afterward too.
             page.reload()
             page.wait_for_selector(
@@ -789,12 +819,14 @@ def main() -> int:
             page.select_option("#material-select", label="6061-T6 Aluminum (Extruded)")
             page.set_input_files("#dxf-file-input", str(PROJECT_ROOT / "eat" / "fixtures" / "rectangle_50x100.dxf"))
             page.wait_for_selector("#baseline-section:not([hidden])", timeout=5000)
-            pcts_after_restart = read_baseline_pcts()
+            page.wait_for_selector("#baseline-metrics .baseline-metric", timeout=5000)
+            metrics_after_restart = read_baseline_metrics()
             checks.append(
                 Check(
                     "Baseline: post-restart, a fresh analysis still compares correctly against the persisted baseline",
-                    all(abs(pcts_after_restart.get(label, 999)) < 0.5 for label in expected_pcts),
-                    f"{pcts_after_restart}",
+                    len(metrics_after_restart) == len(expected)
+                    and all(_rel_close(profile, base, 1e-2) for profile, base in metrics_after_restart.values()),
+                    f"{metrics_after_restart}",
                 )
             )
 
