@@ -1,0 +1,90 @@
+[
+  {
+    "name": "6061-T6 Aluminum (Extruded)",
+    "density": 2700,
+    "E": 69000000000.0,
+    "G": 26000000000.0,
+    "nu": 0.33,
+    "yield_strength": 241000000.0,
+    "ultimate_strength": 262000000.0,
+    "shear_strength": 165000000.0,
+    "shear_strength_approximate": false
+  },
+  {
+    "name": "6063-T6 Aluminum (Extruded)",
+    "density": 2700,
+    "E": 68900000000.0,
+    "G": 25800000000.0,
+    "nu": 0.33,
+    "yield_strength": 214000000.0,
+    "ultimate_strength": 241000000.0,
+    "shear_strength": 152000000.0,
+    "shear_strength_approximate": false
+  },
+  {
+    "name": "6082-T6 Aluminum (Extruded)",
+    "density": 2700,
+    "E": 70000000000.0,
+    "G": 26000000000.0,
+    "nu": 0.33,
+    "yield_strength": 250000000.0,
+    "ultimate_strength": 290000000.0,
+    "shear_strength": 170000000.0,
+    "shear_strength_approximate": false
+  },
+  {
+    "name": "2024-T6 Aluminum (Extruded)",
+    "density": 2780,
+    "E": 73100000000.0,
+    "G": 28000000000.0,
+    "nu": 0.33,
+    "yield_strength": 393000000.0,
+    "ultimate_strength": 476000000.0,
+    "shear_strength": 283000000.0,
+    "shear_strength_approximate": false
+  },
+  {
+    "name": "7075-T6 Aluminum (Extruded)",
+    "density": 2810,
+    "E": 71700000000.0,
+    "G": 26900000000.0,
+    "nu": 0.33,
+    "yield_strength": 503000000.0,
+    "ultimate_strength": 572000000.0,
+    "shear_strength": 331000000.0,
+    "shear_strength_approximate": false
+  },
+  {
+    "name": "ABS (Extruded, Unfilled)",
+    "density": 1040,
+    "E": 2300000000.0,
+    "G": 850000000.0,
+    "nu": 0.35,
+    "yield_strength": 40000000.0,
+    "ultimate_strength": 45000000.0,
+    "shear_strength": 26000000.0,
+    "shear_strength_approximate": true
+  },
+  {
+    "name": "Polycarbonate (Extruded, Unfilled)",
+    "density": 1200,
+    "E": 2400000000.0,
+    "G": 880000000.0,
+    "nu": 0.37,
+    "yield_strength": 62000000.0,
+    "ultimate_strength": 65000000.0,
+    "shear_strength": 43000000.0,
+    "shear_strength_approximate": true
+  },
+  {
+    "name": "Nylon – PA6 (Extruded, Dry as Molded)",
+    "density": 1140,
+    "E": 2800000000.0,
+    "G": 1000000000.0,
+    "nu": 0.39,
+    "yield_strength": 80000000.0,
+    "ultimate_strength": 85000000.0,
+    "shear_strength": 55000000.0,
+    "shear_strength_approximate": true
+  }
+]

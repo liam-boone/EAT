@@ -39,12 +39,17 @@ from shapely.geometry.polygon import orient
 
 @dataclass
 class Material:
-    """Minimal material definition for section analysis.
+    """Material definition for section analysis.
 
     Supply either `nu` (Poisson's ratio) or `G` (shear modulus) — the other
-    is derived from the isotropic relation G = E / (2 * (1 + nu)). This is
-    a standalone stand-in for the material-list feature (build step 2); it
-    is not backed by the JSON material file yet.
+    is derived from the isotropic relation G = E / (2 * (1 + nu)). If both
+    are supplied (e.g. from a datasheet where they weren't derived from each
+    other), both are kept as given rather than one overwriting the other.
+
+    `ultimate_strength`, `shear_strength`, `shear_strength_approximate`, and
+    `density` back the JSON-backed material list (build step 2, see
+    `eat.materials`); all are optional so existing callers that only pass
+    name/E/nu(or G)/yield_strength are unaffected.
     """
 
     name: str
@@ -52,6 +57,10 @@ class Material:
     nu: float | None = None  # Poisson's ratio, dimensionless
     G: float | None = None  # shear modulus, MPa
     yield_strength: float | None = None  # MPa
+    ultimate_strength: float | None = None  # MPa
+    shear_strength: float | None = None  # MPa
+    shear_strength_approximate: bool = False  # True if shear_strength is a rough published figure
+    density: float | None = None  # kg/m^3 (not used by the section engine itself)
 
     def __post_init__(self) -> None:
         if self.nu is None and self.G is None:
