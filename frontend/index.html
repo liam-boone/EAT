@@ -16,6 +16,7 @@
     <span class="topbar__subtitle">Extrusion Analysis Tool</span>
   </div>
   <div class="topbar__actions">
+    <button type="button" class="btn btn--ghost" id="btn-open-history">History</button>
     <input type="file" id="dxf-file-input" accept=".dxf" hidden />
     <button type="button" class="btn btn--ghost" id="btn-import-dxf">Import DXF</button>
   </div>
@@ -24,6 +25,19 @@
 <div id="error-banner" class="error-banner" hidden role="alert">
   <span class="error-banner__text" id="error-banner-text"></span>
   <button type="button" class="error-banner__close" id="error-banner-close" aria-label="Dismiss error">&times;</button>
+</div>
+
+<div id="history-modal" class="modal-overlay" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="history-modal-heading">
+    <div class="modal__header">
+      <h2 id="history-modal-heading" class="panel__title">Run History</h2>
+      <button type="button" class="modal__close" id="btn-close-history" aria-label="Close history">&times;</button>
+    </div>
+    <div class="modal__body">
+      <p class="hint" id="history-empty-hint" hidden>No history yet — run a section or beam analysis to see it here.</p>
+      <ul class="history-list" id="history-list"></ul>
+    </div>
+  </div>
 </div>
 
 <main class="layout">

@@ -64,6 +64,12 @@ const errorBanner = document.getElementById("error-banner");
 const errorBannerText = document.getElementById("error-banner-text");
 const errorBannerClose = document.getElementById("error-banner-close");
 
+const btnOpenHistory = document.getElementById("btn-open-history");
+const btnCloseHistory = document.getElementById("btn-close-history");
+const historyModal = document.getElementById("history-modal");
+const historyListEl = document.getElementById("history-list");
+const historyEmptyHint = document.getElementById("history-empty-hint");
+
 /* ------------------------------------------------------------------
    API helper — surfaces the API's own error text, never swallows it
 ------------------------------------------------------------------ */
@@ -607,6 +613,7 @@ async function renderSolidFillComparison(r) {
       body: JSON.stringify({
         vertices: r.vertices,
         material_name: state.selectedMaterial,
+        save_history: false, // derived lookup, not a user-facing analysis run
       }),
     });
     solidFillGrid.innerHTML = "";
@@ -797,7 +804,7 @@ function safetyFactorClass(sf) {
 }
 
 btnAnalyzeBeam.addEventListener("click", async () => {
-  if (!state.sectionId) {
+  if (!state.isClosed || state.points.length < 3 || !state.selectedMaterial) {
     showError("Close a profile and select a material before analyzing a beam.");
     return;
   }
@@ -819,6 +826,25 @@ btnAnalyzeBeam.addEventListener("click", async () => {
   hideError();
   btnAnalyzeBeam.disabled = true;
   try {
+    if (!state.sectionId) {
+      // Profile was reloaded from history (or some other path that never
+      // hit computeSection()) and never got a fresh section_id -- get one
+      // silently. This is just plumbing to satisfy /beam's section_id
+      // requirement, not a user-facing analysis run in its own right, so
+      // it doesn't get its own history entry -- the /beam call right
+      // below (which always logs) is the real record of what happened.
+      const sectionBody = await apiFetch("/section", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          vertices: state.points.map((p) => [p.x, p.y]),
+          holes: state.holes.map((loop) => loop.map((p) => [p.x, p.y])),
+          material_name: state.selectedMaterial,
+          save_history: false,
+        }),
+      });
+      state.sectionId = sectionBody.section_id;
+    }
     const body = await apiFetch("/beam", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1016,6 +1042,162 @@ function drawLineChart(container, xValues, yValues, opts) {
   svg += "</svg>";
   container.innerHTML = svg;
 }
+
+/* ------------------------------------------------------------------
+   Run history
+------------------------------------------------------------------ */
+
+function fmtTimestamp(iso) {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
+}
+
+async function openHistory() {
+  hideError();
+  historyModal.hidden = false;
+  historyListEl.innerHTML = "";
+  historyEmptyHint.hidden = true;
+  try {
+    const entries = await apiFetch("/history");
+    if (entries.length === 0) {
+      historyEmptyHint.hidden = false;
+      return;
+    }
+    entries.forEach((entry) => historyListEl.appendChild(renderHistoryRow(entry)));
+  } catch (err) {
+    showError(`Could not load history: ${err.message}`);
+  }
+}
+
+function closeHistory() {
+  historyModal.hidden = true;
+}
+
+function renderHistoryRow(summary) {
+  const li = document.createElement("li");
+  li.className = "history-row";
+
+  const main = document.createElement("button");
+  main.type = "button";
+  main.className = "history-row__main";
+
+  const timestamp = document.createElement("div");
+  timestamp.className = "history-row__timestamp";
+  timestamp.textContent = fmtTimestamp(summary.created_at);
+
+  const material = document.createElement("div");
+  material.className = "history-row__material";
+  material.textContent = summary.material;
+
+  const meta = document.createElement("div");
+  meta.className = "history-row__meta";
+  const areaSpan = document.createElement("span");
+  areaSpan.textContent = `${fmtNum(summary.area)} mm²`;
+  meta.appendChild(areaSpan);
+  if (summary.has_holes) {
+    const tag = document.createElement("span");
+    tag.className = "history-row__tag";
+    tag.textContent = "holes";
+    meta.appendChild(tag);
+  }
+  if (summary.has_beam) {
+    const tag = document.createElement("span");
+    tag.className = "history-row__tag";
+    tag.textContent = "beam";
+    meta.appendChild(tag);
+  }
+
+  main.appendChild(timestamp);
+  main.appendChild(material);
+  main.appendChild(meta);
+  main.addEventListener("click", () => loadHistorySelection(summary.id));
+
+  const deleteBtn = document.createElement("button");
+  deleteBtn.type = "button";
+  deleteBtn.className = "history-row__delete";
+  deleteBtn.textContent = "×";
+  deleteBtn.setAttribute("aria-label", "Delete history entry");
+  deleteBtn.addEventListener("click", async (ev) => {
+    ev.stopPropagation();
+    try {
+      await apiFetch(`/history/${summary.id}`, { method: "DELETE" });
+      li.remove();
+      if (historyListEl.children.length === 0) historyEmptyHint.hidden = false;
+    } catch (err) {
+      showError(`Could not delete history entry: ${err.message}`);
+    }
+  });
+
+  li.appendChild(main);
+  li.appendChild(deleteBtn);
+  return li;
+}
+
+async function loadHistorySelection(id) {
+  try {
+    const entry = await apiFetch(`/history/${id}`);
+    loadHistoryEntry(entry);
+    closeHistory();
+  } catch (err) {
+    showError(`Could not load history entry: ${err.message}`);
+  }
+}
+
+/** Reproduces a past run's sketch/results view exactly -- renders the
+ * *stored* section/beam results directly rather than recomputing them,
+ * so it stays accurate even if the material (or the profile, re-run
+ * since) would now give different numbers. `state.sectionId` is
+ * deliberately left unset: a later "Analyze Beam" click fetches a fresh
+ * one on demand (see that handler) rather than this reload silently
+ * creating its own history entry just from being viewed. */
+function loadHistoryEntry(entry) {
+  hideError();
+  state.points = entry.vertices.map(([x, y]) => ({ x, y }));
+  state.holes = (entry.holes || []).map((loop) => loop.map(([x, y]) => ({ x, y })));
+  state.isClosed = true;
+  state.sectionId = null;
+  fitViewToPolygon(state.points);
+  layoutCanvas();
+  updateToolbarState();
+
+  if (state.materials.some((m) => m.name === entry.material)) {
+    state.selectedMaterial = entry.material;
+    materialSelect.value = entry.material;
+  }
+
+  // section_result is the bare eat.section.SectionResult dict (no
+  // vertices/holes of its own -- those live on the entry) -- add them so
+  // renderSolidFillComparison behaves the same as it does live. That
+  // comparison is always a fresh lookup even in the live flow (never
+  // part of the frozen result), so recomputing it here doesn't touch the
+  // primary hollow-section numbers this function is about reproducing
+  // exactly.
+  renderSectionResults({ ...entry.section_result, vertices: entry.vertices, holes: entry.holes });
+  sectionResultsEl.hidden = false;
+  beamInputsEl.hidden = false;
+
+  if (entry.beam_result && entry.beam_request) {
+    inputLength.value = entry.beam_request.length;
+    inputBc.value = entry.beam_request.boundary_condition;
+    state.pointLoads = (entry.beam_request.point_loads || []).map((pl) => ({ ...pl }));
+    renderPointLoads();
+    const axial = entry.beam_request.axial_load;
+    inputAxial.value = axial === null || axial === undefined ? "" : axial;
+    renderBeamResults(entry.beam_result);
+    beamResultsEl.hidden = false;
+  } else {
+    beamResultsEl.hidden = true;
+  }
+}
+
+btnOpenHistory.addEventListener("click", openHistory);
+btnCloseHistory.addEventListener("click", closeHistory);
+historyModal.addEventListener("click", (ev) => {
+  if (ev.target === historyModal) closeHistory();
+});
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape" && !historyModal.hidden) closeHistory();
+});
 
 /* ------------------------------------------------------------------
    Init

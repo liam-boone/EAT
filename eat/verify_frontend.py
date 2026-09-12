@@ -19,6 +19,17 @@ renders what comes back, for three flows:
    independent closed-form value (|P|*L/4) exactly, max_deflection matches
    |P|*L^3/(48*E*Ixx) for 6061's actual E, and both charts rendered an SVG
    path.
+4. Open the History panel -> confirm the three runs above appear,
+   most-recent-first, with the top row tagged as the beam analysis ->
+   click it to reload -> confirm no new POST /section or /beam fired (the
+   reload is a display of the *stored* result, not a recompute) and that
+   the reloaded GET /history/{id} response's beam_result matches flow 3's
+   live /beam response exactly -> delete a row and confirm it disappears
+   from the list. eat.history's own add/list/get/delete logic is
+   unit-tested in isolation in eat/verify_history.py; this only checks
+   the UI wiring. Every history entry any flow here creates (all four) is
+   swept up at the end, restoring eat/history.json -- the real file a
+   user's actual runs live in -- to its pre-test state.
 
 Also checks two smaller additions to the sketch canvas / results panel:
 
@@ -49,6 +60,7 @@ Run with: python -m eat.verify_frontend [screenshot_path]
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import time
@@ -102,6 +114,15 @@ def _rel_close(actual, expected, tol=1e-3):
     return abs(actual - expected) / abs(expected) <= tol
 
 
+def _get_json(url):
+    with urllib.request.urlopen(url, timeout=5) as resp:
+        return json.loads(resp.read())
+
+
+def _delete(url):
+    urllib.request.urlopen(urllib.request.Request(url, method="DELETE"), timeout=5)
+
+
 def main() -> int:
     screenshot_path = Path(sys.argv[1]) if len(sys.argv) > 1 else PROJECT_ROOT / "eat" / "verify_frontend_screenshot.png"
     checks: list[Check] = []
@@ -114,19 +135,37 @@ def main() -> int:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+    history_baseline_ids: set[str] = set()
     try:
         if not wait_for_server():
             checks.append(Check("Server started", False, "timed out waiting for port"))
             return _report(checks)
         checks.append(Check("Server started", True))
 
+        # Every flow below hits POST /section, /section/from-dxf, and/or
+        # /beam, each of which logs to the real eat/history.json (the same
+        # file an actual user's runs live in) as a side effect -- snapshot
+        # what's there before touching it so it can all be swept up at the
+        # end, same restore-to-original-state discipline as verify_api.py.
+        history_baseline_ids = {e["id"] for e in _get_json(BASE_URL + "/history")}
+
         with sync_playwright() as p:
             browser = p.chromium.launch()
             page = browser.new_page(viewport={"width": 1440, "height": 960})
             page.on("console", lambda msg: console_errors.append(msg.text) if msg.type == "error" else None)
 
+            post_log: list[str] = []
+            history_entry_captures: list[dict] = []
+
             def on_response(resp):
-                for key in ("/section/from-dxf", "/section/to-dxf", "/section", "/beam", "/materials"):
+                if resp.request.method == "POST":
+                    post_log.append(resp.url)
+                if resp.request.method == "GET" and "/history/" in resp.url:
+                    try:
+                        history_entry_captures.append(resp.json())
+                    except Exception:
+                        pass
+                for key in ("/section/from-dxf", "/section/to-dxf", "/section", "/beam", "/materials", "/history"):
                     if resp.url.endswith(key):
                         try:
                             captured[key] = resp.json()
@@ -474,6 +513,104 @@ def main() -> int:
             defl_svg = page.locator("#chart-deflection svg path.chart-line").count()
             checks.append(Check("Beam flow: both charts rendered a data line", stress_svg == 1 and defl_svg == 1))
 
+            # --- Flow 4: run history ---
+            post_log_before_history = list(post_log)
+
+            page.click("#btn-open-history")
+            page.wait_for_selector("#history-modal:not([hidden])", timeout=5000)
+            # The modal itself becomes visible synchronously, but its list
+            # is populated only after openHistory()'s GET /history resolves
+            # -- wait for a row rather than counting immediately, or this
+            # races the fetch and sees zero every time.
+            page.wait_for_selector("#history-list .history-row", timeout=5000)
+
+            history_rows = page.locator("#history-list .history-row")
+            row_count = history_rows.count()
+            checks.append(
+                Check(
+                    "History: modal lists at least 3 entries (rectangle, KJN section, KJN beam)",
+                    row_count >= 3,
+                    f"{row_count} rows",
+                )
+            )
+            empty_hint_hidden = page.locator("#history-empty-hint").evaluate("el => el.hidden")
+            checks.append(Check("History: empty-state hint hidden when entries exist", empty_hint_hidden is True))
+
+            first_row_tags = history_rows.first.locator(".history-row__tag").all_inner_texts()
+            checks.append(
+                Check(
+                    "History: most-recent entry (top row) is the beam analysis, tagged 'beam'",
+                    "beam" in first_row_tags,
+                    f"tags={first_row_tags}",
+                )
+            )
+
+            history_entry_captures.clear()
+            history_rows.first.locator(".history-row__main").click()
+            # state="attached", not the default "visible": a hidden modal
+            # is (correctly) not visible, so waiting for "visible" on a
+            # selector that only matches once it's hidden would never
+            # resolve -- same reasoning as the solid-fill wait above.
+            page.wait_for_selector("#history-modal[hidden]", state="attached", timeout=5000)
+
+            new_posts = post_log[len(post_log_before_history):]
+            checks.append(
+                Check(
+                    "History: loading an entry issues no new POST /section or /beam (frozen, not recomputed)",
+                    all(not (u.endswith("/section") or u.endswith("/beam")) for u in new_posts),
+                    f"new POSTs={new_posts}",
+                )
+            )
+            checks.append(
+                Check(
+                    "History: GET /history/{id} was captured for the clicked entry",
+                    len(history_entry_captures) >= 1,
+                )
+            )
+            if history_entry_captures and beam_resp:
+                loaded_beam = history_entry_captures[-1].get("beam_result") or {}
+                checks.append(
+                    Check(
+                        "History: reloaded entry's stored beam_result matches flow 3's live "
+                        "/beam response exactly (frozen, not recomputed differently)",
+                        loaded_beam.get("max_moment") == beam_resp["max_moment"]
+                        and loaded_beam.get("max_deflection") == beam_resp["max_deflection"],
+                        f"loaded={loaded_beam.get('max_moment')}, original={beam_resp['max_moment']}",
+                    )
+                )
+
+            checks.append(
+                Check(
+                    "History: reloaded view shows both the section and beam results panels",
+                    page.locator("#section-results").is_visible() and page.locator("#beam-results").is_visible(),
+                )
+            )
+            reloaded_stress_svg = page.locator("#chart-stress svg path.chart-line").count()
+            checks.append(Check("History: reloaded beam chart re-rendered a data line", reloaded_stress_svg == 1))
+
+            # --- Delete a row ---
+            page.click("#btn-open-history")
+            page.wait_for_selector("#history-modal:not([hidden])", timeout=5000)
+            page.wait_for_selector("#history-list .history-row", timeout=5000)
+            count_before_delete = page.locator("#history-list .history-row").count()
+            page.locator("#history-list .history-row").first.locator(".history-row__delete").click()
+            try:
+                page.wait_for_function(
+                    f"document.querySelectorAll('#history-list .history-row').length === {count_before_delete - 1}",
+                    timeout=3000,
+                )
+                delete_worked = True
+            except Exception:
+                delete_worked = False
+            checks.append(
+                Check(
+                    "History: delete button removes the row from the list",
+                    delete_worked,
+                    f"count before delete={count_before_delete}",
+                )
+            )
+            page.click("#btn-close-history")
+
             screenshot_path.parent.mkdir(parents=True, exist_ok=True)
             page.screenshot(path=str(screenshot_path), full_page=True)
             checks.append(Check(f"Screenshot saved to {screenshot_path}", screenshot_path.exists()))
@@ -481,6 +618,24 @@ def main() -> int:
             checks.append(Check("No browser console errors", len(console_errors) == 0, "; ".join(console_errors[:5])))
 
             browser.close()
+
+        # Sweep up every history entry any flow above created (sketch,
+        # DXF import, beam analysis all log one; loading/deleting in flow
+        # 4 deliberately don't), restoring eat/history.json to its
+        # pre-test state -- same discipline verify_api.py applies to the
+        # same file.
+        history_after = _get_json(BASE_URL + "/history")
+        for e in history_after:
+            if e["id"] not in history_baseline_ids:
+                _delete(f"{BASE_URL}/history/{e['id']}")
+        history_final_count = len(_get_json(BASE_URL + "/history"))
+        checks.append(
+            Check(
+                "History file restored to its pre-test state",
+                history_final_count == len(history_baseline_ids),
+                f"baseline={len(history_baseline_ids)}, final={history_final_count}",
+            )
+        )
     finally:
         server.terminate()
         try:

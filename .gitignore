@@ -32,3 +32,7 @@ ENV/
 
 # Generated verification artifact (eat/verify_frontend.py), not source
 eat/verify_frontend_screenshot.png
+
+# Run history: user-generated local data (eat.history), not source or a
+# shipped seed list like materials.json -- shouldn't be committed.
+eat/history.json

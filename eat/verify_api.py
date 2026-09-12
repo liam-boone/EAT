@@ -11,6 +11,18 @@ Also confirms POST/PUT/DELETE /materials round-trip cleanly and leave
 materials.json in its original seeded state, same as eat/verify_materials.py
 but exercised through HTTP instead of calling eat.materials directly.
 
+Also confirms the run-history side effects (build step 9): POST /section,
+/section/from-dxf, and /beam each append exactly one history entry (except
+when `save_history: false` is passed, e.g. the frontend's solid-fill
+comparison), GET /history's summaries and GET /history/{id}'s full entry
+round-trip correctly, and DELETE /history/{id} works -- eat.history's own
+add/list/get/delete logic is unit-tested in isolation in
+eat/verify_history.py; this file only checks the HTTP wiring and the
+auto-logging side effect. main() sweeps up every history entry any check
+in this file created, restoring eat/history.json -- the real file a
+user's actual runs live in -- to its pre-test state, the same discipline
+check_materials() already applies to materials.json.
+
 Run with: python -m eat.verify_api
 """
 
@@ -411,13 +423,173 @@ def check_beam(rectangle_section_id: str) -> list[Check]:
     return checks
 
 
+# --- /history ------------------------------------------------------------------
+
+
+def check_history() -> list[Check]:
+    checks: list[Check] = []
+    test_steel = {"name": "Test Steel", "E": 200000, "nu": 0.3, "yield_strength": 250}
+    rectangle = [[0, 0], [50, 0], [50, 100], [0, 100]]
+
+    before_count = len(client.get("/history").json())
+
+    # --- A fresh section-only entry ---
+    resp = client.post("/section", json={"vertices": rectangle, "material": test_steel, "mesh_size": 1.0})
+    checks.append(Check("POST /section (for history test): 200 OK", resp.status_code == 200, resp.text))
+    section_id = resp.json()["section_id"]
+
+    after_section = client.get("/history").json()
+    checks.append(
+        Check(
+            "POST /section creates exactly one new history entry",
+            len(after_section) == before_count + 1,
+            f"before={before_count}, after={len(after_section)}",
+        )
+    )
+    section_summary = after_section[0]  # most-recent-first
+    checks.append(
+        Check(
+            "New entry's summary: material/area/has_holes/has_beam correct",
+            section_summary["material"] == "Test Steel"
+            and _rel_close(section_summary["area"], 5000.0, 1e-6)
+            and section_summary["has_holes"] is False
+            and section_summary["has_beam"] is False,
+            f"{section_summary}",
+        )
+    )
+    section_entry_id = section_summary["id"]
+
+    resp = client.get(f"/history/{section_entry_id}")
+    checks.append(Check("GET /history/{id}: 200 OK for the section-only entry", resp.status_code == 200, resp.text))
+    body = resp.json()
+    checks.append(
+        Check(
+            "GET /history/{id}: vertices and section_result round-trip exactly",
+            body["vertices"] == rectangle and _rel_close(body["section_result"]["area"], 5000.0, 1e-6),
+            f"vertices={body.get('vertices')}, area={body.get('section_result', {}).get('area')}",
+        )
+    )
+    checks.append(
+        Check(
+            "GET /history/{id}: section-only entry has no beam_request/beam_result",
+            body["beam_request"] is None and body["beam_result"] is None,
+        )
+    )
+
+    # --- save_history: false suppresses logging (e.g. the frontend's
+    # solid-fill comparison, or its section_id refresh before a beam
+    # re-analysis) ---
+    count_before_suppressed = len(client.get("/history").json())
+    resp = client.post(
+        "/section",
+        json={"vertices": rectangle, "material": test_steel, "mesh_size": 1.0, "save_history": False},
+    )
+    checks.append(Check("POST /section (save_history=false): 200 OK", resp.status_code == 200, resp.text))
+    count_after_suppressed = len(client.get("/history").json())
+    checks.append(
+        Check(
+            "POST /section with save_history=false creates no history entry",
+            count_after_suppressed == count_before_suppressed,
+            f"before={count_before_suppressed}, after={count_after_suppressed}",
+        )
+    )
+
+    # --- A beam analysis against the same section adds its own entry ---
+    resp = client.post(
+        "/beam",
+        json={
+            "section_id": section_id,
+            "material": test_steel,
+            "length": 1000,
+            "boundary_condition": "simply_supported",
+            "point_loads": [{"position_fraction": 0.5, "magnitude": -1000}],
+        },
+    )
+    checks.append(Check("POST /beam (for history test): 200 OK", resp.status_code == 200, resp.text))
+
+    after_beam = client.get("/history").json()
+    checks.append(
+        Check(
+            "POST /beam creates exactly one new history entry (on top of the section one)",
+            len(after_beam) == before_count + 2,
+            f"count={len(after_beam)}, expected={before_count + 2}",
+        )
+    )
+    beam_summary = after_beam[0]  # most-recent-first
+    beam_entry_id = beam_summary["id"]
+    checks.append(Check("Beam-triggered entry's summary: has_beam=True", beam_summary["has_beam"] is True))
+
+    resp = client.get(f"/history/{beam_entry_id}")
+    body = resp.json()
+    checks.append(
+        Check(
+            "GET /history/{id}: beam entry's beam_request/beam_result match what was just computed",
+            body["beam_request"]["length"] == 1000
+            and body["beam_request"]["boundary_condition"] == "simply_supported"
+            and _rel_close(abs(body["beam_result"]["max_moment"]), 250000.0, 1e-6),
+            f"beam_request={body.get('beam_request')}, max_moment={body.get('beam_result', {}).get('max_moment')}",
+        )
+    )
+
+    # --- DELETE ---
+    resp = client.delete(f"/history/{section_entry_id}")
+    checks.append(Check("DELETE /history/{id}: 204", resp.status_code == 204, resp.text))
+    remaining_ids = [s["id"] for s in client.get("/history").json()]
+    checks.append(
+        Check(
+            "DELETE /history/{id}: entry actually removed from the list",
+            section_entry_id not in remaining_ids,
+            f"remaining={remaining_ids}",
+        )
+    )
+
+    resp = client.delete("/history/does-not-exist")
+    checks.append(Check("DELETE /history/{id}: unknown id -> 404", resp.status_code == 404, resp.text))
+
+    resp = client.get("/history/does-not-exist")
+    checks.append(Check("GET /history/{id}: unknown id -> 404", resp.status_code == 404, resp.text))
+
+    # Clean up the one entry this function didn't already delete above
+    # (the beam one) -- overall history-file hygiene across a full
+    # verification run is handled by main()'s before/after sweep, but
+    # deleting our own known leftover here keeps this function
+    # self-contained too.
+    client.delete(f"/history/{beam_entry_id}")
+
+    return checks
+
+
 def main() -> int:
+    # Snapshot history before anything runs: check_section/_from_dxf/_beam
+    # all trigger their own history-logging as a side effect of exercising
+    # /section, /section/from-dxf, and /beam, same as real usage would.
+    # Sweeping up everything new at the end (rather than hand-tracking ids
+    # through every function) keeps eat/history.json -- the real file a
+    # user's actual runs live in, not a throwaway test fixture -- exactly
+    # as it was before this script ran, the same restore-to-original-state
+    # discipline check_materials() already applies to materials.json.
+    history_baseline_ids = {s["id"] for s in client.get("/history").json()}
+
     section_checks, rectangle_section_id = check_section()
     all_checks = (
         section_checks
         + check_section_from_dxf()
         + check_materials()
         + check_beam(rectangle_section_id)
+        + check_history()
+    )
+
+    history_after = client.get("/history").json()
+    new_ids = [s["id"] for s in history_after if s["id"] not in history_baseline_ids]
+    for entry_id in new_ids:
+        client.delete(f"/history/{entry_id}")
+    history_final_count = len(client.get("/history").json())
+    all_checks.append(
+        Check(
+            "History file restored to its pre-test state",
+            history_final_count == len(history_baseline_ids),
+            f"baseline={len(history_baseline_ids)}, final={history_final_count}",
+        )
     )
 
     width = max(len(c.label) for c in all_checks) + 2

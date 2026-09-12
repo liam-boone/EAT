@@ -1,6 +1,7 @@
 """
 EAT FastAPI layer — wires together the section engine (step 1), material
-list (step 2), beam engine (step 3), and DXF I/O (step 4) as an HTTP API.
+list (step 2), beam engine (step 3), DXF I/O (step 4), and run history
+(step 9) as an HTTP API.
 
 No frontend yet: this is the API layer only, meant to be exercised via
 the auto-generated docs at /docs (Swagger UI) or curl/httpie. See
@@ -16,20 +17,29 @@ A computed section can be referenced by id in a later POST /beam call
 (`section_id`, returned by POST /section and /section/from-dxf) instead
 of resending its vertices. This cache is in-memory and per-process — it
 resets on server restart and is not shared across workers; that's fine
-for this tool's single-user, single-process local-server use case.
+for this tool's single-user, single-process local-server use case. It
+also retains the section's original vertices/holes (`_CachedSection`),
+needed to log a full profile snapshot to history when a later POST /beam
+references it by id rather than resending geometry.
+
+Every successful POST /section, /section/from-dxf, and /beam call also
+appends a full snapshot (profile, material, inputs, and the
+already-computed result) to eat.history's JSON-backed log -- see that
+module's docstring for why a JSON file over SQLite here.
 """
 
 from __future__ import annotations
 
 import uuid
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 
+from eat import history
 from eat.beam import BeamResult, BoundaryCondition, PointLoad, analyze_beam
 from eat.dxf_io import DxfImportError, export_polygon_to_text, import_polygon_from_bytes
 from eat.materials import (
@@ -49,9 +59,17 @@ app = FastAPI(
     version="0.1.0",
 )
 
-# In-memory cache: section_id -> SectionResult, populated by POST /section
+
+@dataclass
+class _CachedSection:
+    result: SectionResult
+    vertices: list[Vertex]
+    holes: list[list[Vertex]]
+
+
+# In-memory cache: section_id -> _CachedSection, populated by POST /section
 # and /section/from-dxf, consumed by POST /beam's optional section_id input.
-_SECTION_CACHE: dict[str, SectionResult] = {}
+_SECTION_CACHE: dict[str, _CachedSection] = {}
 
 
 def _error_message(exc: Exception) -> str:
@@ -141,6 +159,12 @@ class SectionRequest(BaseModel):
     material_name: str | None = Field(None, description="Look up a material from materials.json")
     material: MaterialSpec | None = Field(None, description="...or supply one inline")
     mesh_size: float | None = None
+    save_history: bool = Field(
+        True,
+        description="Log this analysis to run history. Set False for internal/derived lookups "
+        "that aren't a user-facing analysis run in their own right (e.g. the frontend's "
+        "solid-fill comparison, or refetching a section_id for a profile reloaded from history).",
+    )
 
 
 class DxfLoopInfo(BaseModel):
@@ -217,9 +241,9 @@ class SectionResponse(BaseModel):
         )
 
 
-def _store_section(result: SectionResult) -> str:
+def _store_section(result: SectionResult, vertices: list[Vertex], holes: list[list[Vertex]] | None) -> str:
     section_id = uuid.uuid4().hex
-    _SECTION_CACHE[section_id] = result
+    _SECTION_CACHE[section_id] = _CachedSection(result=result, vertices=vertices, holes=holes or [])
     return section_id
 
 
@@ -231,13 +255,21 @@ def _run_section_analysis(
     dxf_warnings: list[str] | None = None,
     dxf_loops: list[DxfLoopInfo] | None = None,
     dxf_outer_loop_index: int | None = None,
+    save_history: bool = True,
 ) -> SectionResponse:
     try:
         result = analyze_section(vertices, material, mesh_size=mesh_size, holes=holes)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    if save_history:
+        history.add_entry(
+            material=result.material,
+            vertices=vertices,
+            holes=holes,
+            section_result=result.as_dict(),
+        )
     return SectionResponse.from_result(
-        _store_section(result),
+        _store_section(result, vertices, holes),
         vertices,
         result,
         holes,
@@ -250,7 +282,9 @@ def _run_section_analysis(
 @app.post("/section", response_model=SectionResponse)
 def post_section(req: SectionRequest) -> SectionResponse:
     material = _resolve_material(req.material_name, req.material)
-    return _run_section_analysis(req.vertices, material, req.mesh_size, holes=req.holes)
+    return _run_section_analysis(
+        req.vertices, material, req.mesh_size, holes=req.holes, save_history=req.save_history
+    )
 
 
 @app.post("/section/from-dxf", response_model=SectionResponse)
@@ -423,13 +457,16 @@ def post_beam(req: BeamRequest) -> BeamResponse:
     material = _resolve_material(req.material_name, req.material)
 
     if req.section_id is not None:
-        section = _SECTION_CACHE.get(req.section_id)
-        if section is None:
+        cached = _SECTION_CACHE.get(req.section_id)
+        if cached is None:
             raise HTTPException(
                 404,
                 f"No cached section with id '{req.section_id}'. It may have expired "
                 "(server restarted) or never existed — POST /section first.",
             )
+        section = cached.result
+        vertices = cached.vertices
+        holes = cached.holes
     else:
         assert req.section is not None
         try:
@@ -441,6 +478,8 @@ def post_beam(req: BeamRequest) -> BeamResponse:
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
+        vertices = req.section.vertices
+        holes = req.section.holes or []
 
     point_loads = [PointLoad(pl.position_fraction, pl.magnitude, axis=pl.axis) for pl in req.point_loads]
 
@@ -456,7 +495,71 @@ def post_beam(req: BeamRequest) -> BeamResponse:
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
-    return BeamResponse.from_result(result)
+    response = BeamResponse.from_result(result)
+
+    history.add_entry(
+        material=section.material,
+        vertices=vertices,
+        holes=holes,
+        section_result=section.as_dict(),
+        beam_request={
+            "length": req.length,
+            "boundary_condition": req.boundary_condition,
+            "point_loads": [pl.model_dump() for pl in req.point_loads],
+            "axial_load": req.axial_load,
+        },
+        beam_result=response.model_dump(),
+    )
+
+    return response
+
+
+# --- History endpoints --------------------------------------------------------
+
+
+class HistorySummaryResponse(BaseModel):
+    id: str
+    created_at: str
+    material: str
+    area: float | None
+    has_holes: bool
+    has_beam: bool
+
+
+class HistoryEntryResponse(BaseModel):
+    id: str
+    created_at: str
+    material: str
+    vertices: list[Vertex]
+    holes: list[list[Vertex]]
+    section_result: dict[str, Any]
+    beam_request: dict[str, Any] | None
+    beam_result: dict[str, Any] | None
+
+
+@app.get("/history", response_model=list[HistorySummaryResponse])
+def get_history() -> list[HistorySummaryResponse]:
+    """Most-recent-first summaries -- enough to identify each run at a
+    glance (timestamp, material, area, whether it has holes/a beam run)
+    without shipping every entry's full diagram arrays over the wire."""
+    return [HistorySummaryResponse(**s) for s in history.list_summaries()]
+
+
+@app.get("/history/{entry_id}", response_model=HistoryEntryResponse)
+def get_history_entry(entry_id: str) -> HistoryEntryResponse:
+    try:
+        entry = history.get_entry(entry_id)
+    except KeyError as exc:
+        raise HTTPException(404, _error_message(exc)) from exc
+    return HistoryEntryResponse(**asdict(entry))
+
+
+@app.delete("/history/{entry_id}", status_code=204)
+def delete_history_entry(entry_id: str) -> None:
+    try:
+        history.delete_entry(entry_id)
+    except KeyError as exc:
+        raise HTTPException(404, _error_message(exc)) from exc
 
 
 # Frontend static files (build step 6). Mounted last and at "/" so it acts
