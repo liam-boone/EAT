@@ -74,6 +74,19 @@ engineering-formula tool built on real section geometry.
 5. FastAPI endpoints wrapping 1–4
 6. Frontend: canvas sketcher → results panel, wired to the API last
 
+## Future / backlog (post-v1)
+- **Run history**: since the tool is mainly for comparing iterations, keep a
+  history of past analyses (profile + material + length/loads + results) that
+  can be browsed back through, not just the current one-off result
+- **Baseline comparison section**: a dedicated results section showing
+  headline comparison figures against a reference profile — e.g. "X.X%
+  stiffness vs. baseline," repeated for deflection and safety factor (and any
+  other metric where a relative comparison is more useful than an absolute
+  number). Baseline options:
+  - A built-in reference: 20x40 KJN-series aluminum extrusion
+  - Any DXF the user has analyzed, selectable as the baseline going forward,
+    so all subsequent comparisons are made against it
+
 ## Open items to decide once you start building
 - Sign/direction convention for loads and axes (recommend fixing this early
   and documenting it, since BC + load direction combinations are the easiest
