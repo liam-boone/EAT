@@ -137,16 +137,27 @@ class SectionResult:
         return "\n".join(lines)
 
 
-def _build_geometry(vertices: list[tuple[float, float]]) -> Geometry:
-    """Build a sectionproperties Geometry from a simple closed polygon.
+def _build_geometry(
+    vertices: list[tuple[float, float]],
+    holes: list[list[tuple[float, float]]] | None = None,
+) -> Geometry:
+    """Build a sectionproperties Geometry from a simple closed polygon,
+    optionally with interior holes subtracted.
 
-    Vertices should describe a single simple (non-self-intersecting) ring;
-    the last point does not need to repeat the first. Winding order is
-    normalised to counter-clockwise, which is what sectionproperties expects.
+    Vertices (and each hole's vertices) should describe a single simple
+    (non-self-intersecting) ring; the last point does not need to repeat
+    the first. `orient(..., sign=1.0)` normalises the exterior ring to
+    counter-clockwise and every interior (hole) ring to clockwise, which
+    is both what sectionproperties expects and the standard Shapely
+    convention -- confirmed against a hand-calculable case (50x100mm
+    rectangle minus a centered 20x20mm square hole) in verify_section.py.
     """
     if len(vertices) < 3:
         raise ValueError("A polygon needs at least 3 vertices")
-    polygon = orient(Polygon(vertices), sign=1.0)
+    for hole in holes or []:
+        if len(hole) < 3:
+            raise ValueError("A hole needs at least 3 vertices")
+    polygon = orient(Polygon(vertices, holes or None), sign=1.0)
     # Use the pure geometric default material (E=1, nu=0) so the raw
     # geometric getters (get_ic, get_j, ...) stay available; the caller's
     # Material is applied afterwards to derive stiffness values.
@@ -157,14 +168,21 @@ def analyze_section(
     vertices: list[tuple[float, float]],
     material: Material,
     mesh_size: float | None = None,
+    holes: list[list[tuple[float, float]]] | None = None,
 ) -> SectionResult:
     """Run a full section analysis on a polygon and return its properties.
+
+    `holes`, if given, is a list of closed polygons (each a list of (x, y)
+    vertices, mm) fully enclosed within `vertices`; their area is
+    subtracted from the outer profile before any property is computed --
+    sectionproperties does this natively via Shapely's `Polygon(shell,
+    holes)` rather than any hand-rolled subtraction.
 
     `mesh_size` is the target triangle area for the FE mesh (mm^2). If not
     given, it's picked as a fraction of the section's bounding-box area,
     which is fine enough for typical extrusion profiles.
     """
-    geom = _build_geometry(vertices)
+    geom = _build_geometry(vertices, holes)
 
     if mesh_size is None:
         minx, miny, maxx, maxy = geom.geom.bounds
@@ -224,6 +242,7 @@ def _example_json() -> dict:
         "material": {"name": "6061-T6", "E": 68900, "nu": 0.33, "yield_strength": 276},
         "mesh_size": None,
         "vertices": [[0, 0], [50, 0], [50, 100], [0, 100]],
+        "holes": [],
     }
 
 
@@ -252,8 +271,9 @@ def _main(argv: list[str] | None = None) -> int:
     material = Material(**data["material"])
     vertices = [tuple(p) for p in data["vertices"]]
     mesh_size = data.get("mesh_size")
+    holes = [[tuple(p) for p in hole] for hole in data.get("holes", [])]
 
-    result = analyze_section(vertices, material, mesh_size=mesh_size)
+    result = analyze_section(vertices, material, mesh_size=mesh_size, holes=holes or None)
 
     if args.json:
         print(json.dumps(result.as_dict(), indent=2))

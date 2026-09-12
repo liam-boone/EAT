@@ -107,6 +107,38 @@ def check_section() -> list[Check]:
         )
     )
 
+    # Holes (build step 8): rectangle with a centered square hole,
+    # subtracted natively via sectionproperties -- same exact-match case
+    # as eat.verify_section's hole check, exercised through the API.
+    hole = [[15, 40], [35, 40], [35, 60], [15, 60]]  # 20x20 centered in 50x100
+    resp = client.post(
+        "/section",
+        json={
+            "vertices": rectangle,
+            "holes": [hole],
+            "material_name": "6061-T6 Aluminum (Extruded)",
+            "mesh_size": 0.5,
+        },
+    )
+    checks.append(Check("POST /section (with holes): 200 OK", resp.status_code == 200, resp.text))
+    body = resp.json()
+    checks.append(
+        Check(
+            "POST /section (with holes): Area/Ixx/Iyy match analytic subtraction",
+            _rel_close(body["area"], 4600.0, 1e-3)
+            and _rel_close(body["ixx"], 4153333.333333333, 1e-3)
+            and _rel_close(body["iyy"], 1028333.3333333333, 1e-3),
+            f"area={body['area']}, ixx={body['ixx']}, iyy={body['iyy']}",
+        )
+    )
+    checks.append(
+        Check(
+            "POST /section (with holes): holes echoed back in response",
+            body["holes"] == [hole],
+            f"holes={body.get('holes')}",
+        )
+    )
+
     return checks, section_id
 
 
@@ -149,10 +181,11 @@ def check_section_from_dxf() -> list[Check]:
         )
     )
 
-    # Two disjoint closed loops in one file: valid multi-loop input (build
-    # step 7) -- the larger loop is used as the outer profile, and both
-    # are reported in dxf_loops rather than the old "exactly one entity"
-    # rejection.
+    # Two disjoint closed loops (neither containing the other): step 7
+    # treated this as valid multi-loop input, but step 8 tightens that --
+    # every non-outer loop must now be a fully-enclosed hole, so a
+    # disjoint "interior" loop is out of scope and rejected with a clear
+    # reason (same tightening as eat.verify_dxf's equivalent test).
     doc = ezdxf.new(dxfversion="R2010")
     doc.units = ezdxf_units.MM
     msp = doc.modelspace()
@@ -169,16 +202,44 @@ def check_section_from_dxf() -> list[Check]:
         files={"file": ("two_loops.dxf", io.BytesIO(dxf_bytes), "application/dxf")},
         data={"material_name": "6061-T6 Aluminum (Extruded)"},
     )
-    checks.append(Check("POST /section/from-dxf: two disjoint loops -> 200 (multi-loop)", resp.status_code == 200, resp.text))
+    checks.append(
+        Check(
+            "POST /section/from-dxf: two disjoint (non-hole) loops -> 400 with clean message",
+            resp.status_code == 400 and "not fully contained" in resp.json()["detail"],
+            resp.text,
+        )
+    )
+
+    # A loop that IS a proper hole (fully contained in the outer boundary):
+    # valid multi-loop input, subtracted from the analyzed section and
+    # echoed back in `holes` (build step 8).
+    doc2 = ezdxf.new(dxfversion="R2010")
+    doc2.units = ezdxf_units.MM
+    msp2 = doc2.modelspace()
+    outer = msp2.add_lwpolyline([(0, 0), (50, 0), (50, 30), (0, 30)])
+    outer.closed = True
+    hole = msp2.add_lwpolyline([(20, 10), (30, 10), (30, 20), (20, 20)])
+    hole.closed = True
+    buf2 = io.StringIO()
+    doc2.write(buf2)
+    dxf_bytes2 = buf2.getvalue().encode("utf-8")
+
+    resp = client.post(
+        "/section/from-dxf",
+        files={"file": ("outer_with_hole.dxf", io.BytesIO(dxf_bytes2), "application/dxf")},
+        data={"material_name": "6061-T6 Aluminum (Extruded)", "mesh_size": "0.5"},
+    )
+    checks.append(Check("POST /section/from-dxf (contained hole): 200 OK", resp.status_code == 200, resp.text))
     if resp.status_code == 200:
         body = resp.json()
+        expected_area = 50 * 30 - 10 * 10
         checks.append(
             Check(
-                "POST /section/from-dxf: both loops reported, larger used as outer",
-                body["dxf_loops"] is not None
-                and len(body["dxf_loops"]) == 2
-                and _rel_close(body["area"], 900.0, 1e-2),
-                f"dxf_loops={body.get('dxf_loops')}, area={body.get('area')}",
+                "POST /section/from-dxf (contained hole): area subtracted, holes echoed back",
+                len(body["holes"]) == 1
+                and _rel_close(body["area"], expected_area, 1e-3)
+                and len(body["dxf_loops"]) == 2,
+                f"holes={body.get('holes')}, area={body.get('area')}",
             )
         )
 

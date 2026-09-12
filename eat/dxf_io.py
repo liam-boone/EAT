@@ -29,12 +29,16 @@ single hand-drawn closed polyline, so import is built in two layers:
    source entity was itself flagged "closed". Every closed loop found is
    reported (`DxfImportResult.loops`); the one with the largest enclosed
    area is treated as the outer profile boundary and returned as
-   `vertices`. Interior loops (holes — e.g. an extrusion's screw-boss
-   bores or T-slot channel) are reported but not yet subtracted from the
-   outer profile; that's the next build step. If the edges don't reduce
-   to clean closed loops (a dangling end, a branching junction), import
-   fails with a specific description of the problem rather than guessing
-   how to close the gap.
+   `vertices`. Every other loop is classified against that boundary: a
+   loop fully contained within it is an interior hole (e.g. an
+   extrusion's screw-boss bores or T-slot channel), collected into
+   `DxfImportResult.holes` so `eat.section.analyze_section` can subtract
+   it. A loop that isn't fully contained (disjoint from the outer
+   boundary, or overlapping it without full containment) is out of v1's
+   scope and fails import with a specific description naming which loop
+   and why, rather than guessing how to interpret it. If the edges don't
+   reduce to clean closed loops at all (a dangling end, a branching
+   junction), import fails the same way.
 
 Anything still out of scope (SPLINE/ELLIPSE geometry, non-millimeter
 units, a file with no closed-loop geometry at all) raises
@@ -66,6 +70,7 @@ import ezdxf
 from ezdxf import recover
 from ezdxf import units as ezdxf_units
 from ezdxf.math import bulge_from_arc_angle, bulge_to_arc
+from shapely.geometry import Polygon as _ShapelyPolygon
 
 # Chord tolerance for discretizing arcs/bulges into straight segments, mm.
 # 0.02mm (20 microns) is roughly an order of magnitude finer than typical
@@ -112,9 +117,11 @@ class LoopInfo:
 @dataclass
 class DxfImportResult:
     vertices: list[tuple[float, float]]  # the selected (largest-area) loop
+    holes: list[list[tuple[float, float]]]  # interior loops fully contained in `vertices`
     warnings: list[str]  # ezdxf.recover audit messages, if the file needed repair
     loops: list[LoopInfo]  # every closed loop found, outer and interior alike
     outer_loop_index: int  # index into `loops` that became `vertices`
+    hole_loop_indices: list[int]  # indices into `loops` that became `holes`, same order
 
 
 def _check_units(doc) -> None:
@@ -353,8 +360,37 @@ def _import_from_doc(doc, auditor, source_label: str, chord_tolerance: float) ->
             "vertices; a polygon needs at least 3."
         )
 
+    holes: list[list[tuple[float, float]]] = []
+    hole_indices: list[int] = []
+    if len(loops_points) > 1:
+        outer_poly = _ShapelyPolygon(vertices)
+        for i, pts in enumerate(loops_points):
+            if i == outer_index:
+                continue
+            candidate = _ShapelyPolygon(pts)
+            # `covers` (not the stricter `contains`) so a hole boundary that
+            # happens to touch the outer boundary still counts as enclosed --
+            # only genuine escapes outside the outer profile are rejected.
+            if outer_poly.covers(candidate):
+                holes.append(pts)
+                hole_indices.append(i)
+            else:
+                raise DxfImportError(
+                    f"Loop {i} in '{source_label}' ({loop_infos[i].vertex_count} vertices, "
+                    f"area={loop_infos[i].area:.4g} mm^2, bbox={loop_infos[i].bbox}) is not "
+                    f"fully contained within the outer boundary (loop {outer_index}, "
+                    f"area={loop_infos[outer_index].area:.4g} mm^2) -- it's either disjoint "
+                    "from it or only partially overlapping. v1 only supports interior loops "
+                    "that are fully-enclosed holes; this file needs manual review."
+                )
+
     return DxfImportResult(
-        vertices=vertices, warnings=warnings, loops=loop_infos, outer_loop_index=outer_index
+        vertices=vertices,
+        holes=holes,
+        warnings=warnings,
+        loops=loop_infos,
+        outer_loop_index=outer_index,
+        hole_loop_indices=hole_indices,
     )
 
 
@@ -443,8 +479,10 @@ def _main(argv: list[str] | None = None) -> int:
             json.dumps(
                 {
                     "vertices": result.vertices,
+                    "holes": result.holes,
                     "warnings": result.warnings,
                     "outer_loop_index": result.outer_loop_index,
+                    "hole_loop_indices": result.hole_loop_indices,
                     "loops": [
                         {"vertex_count": l.vertex_count, "area": l.area, "bbox": l.bbox}
                         for l in result.loops

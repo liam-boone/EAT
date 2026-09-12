@@ -9,8 +9,11 @@ renders what comes back, for three flows:
 1. Sketch a 50x100mm rectangle by clicking its four corners -> close loop
    -> confirm the resulting POST /section response has the exact step-1
    Area/Ixx/Iyy, and that the results panel actually renders.
-2. Import eat/fixtures/rectangle_50x100.dxf -> confirm POST /section/from-dxf
-   returns the same values and the canvas/toolbar reflect a closed profile.
+2. Import eat/fixtures/20X40_KJN992891.dxf (the real multi-loop catalog
+   file) -> confirm POST /section/from-dxf returns the step-8
+   holes-subtracted Area, the 3 interior holes are echoed back, and the
+   canvas actually renders them distinctly (not just that the API says
+   so) via a pixel-level scan for the hole-stroke color.
 3. Fill in length + the default point load, select 6061-T6 Aluminum, run
    Analyze beam -> confirm POST /beam's max_moment matches the material-
    independent closed-form value (|P|*L/4) exactly, max_deflection matches
@@ -186,11 +189,23 @@ def main() -> int:
             dxf_resp = captured.get("/section/from-dxf")
             checks.append(Check("DXF import flow: POST /section/from-dxf captured", dxf_resp is not None))
             if dxf_resp:
+                # Build step 8: Area is now the outer boundary MINUS its 3
+                # interior holes (the corrected metal cross-section, per
+                # eat.verify_dxf's real-catalog-file check), not the
+                # solid-outer 489.81 mm^2 step-7 reported before holes
+                # were subtracted.
                 checks.append(
                     Check(
-                        "DXF import flow: outer-loop Area matches step-7 value",
-                        _rel_close(dxf_resp["area"], 489.81, tol=1e-3),
+                        "DXF import flow: holes-subtracted Area matches step-8 corrected value",
+                        _rel_close(dxf_resp["area"], 287.655, tol=1e-3),
                         f"area={dxf_resp['area']}",
+                    )
+                )
+                checks.append(
+                    Check(
+                        "DXF import flow: 3 interior holes echoed back in response",
+                        len(dxf_resp.get("holes", [])) == 3,
+                        f"{len(dxf_resp.get('holes', []))} holes",
                     )
                 )
             checks.append(
@@ -246,6 +261,39 @@ def main() -> int:
                         f"shape center offset from canvas center: {off_x:.1%} x, {off_y:.1%} y",
                     )
                 )
+
+            # Pixel-level check that interior holes actually render, not
+            # just that the API echoes them back: scan for the hole
+            # stroke color (#8D95C4). The profile is closed at this point
+            # (isClosed=true), so drawPolygon()'s only other user of this
+            # color -- the open/unclosed-loop stroke -- can't be active;
+            # any matching pixels must be from drawHole().
+            hole_pixel_found = page.evaluate(
+                """
+                () => {
+                    const canvas = document.getElementById('sketch-canvas');
+                    const ctx = canvas.getContext('2d');
+                    const w = canvas.width, h = canvas.height;
+                    const data = ctx.getImageData(0, 0, w, h).data;
+                    for (let y = 0; y < h; y += 2) {
+                        for (let x = 0; x < w; x += 2) {
+                            const i = (y * w + x) * 4;
+                            const r = data[i], g = data[i + 1], b = data[i + 2], a = data[i + 3];
+                            if (a > 50 && Math.abs(r - 141) < 12 && Math.abs(g - 149) < 12 && Math.abs(b - 196) < 12) {
+                                return true;
+                            }
+                        }
+                    }
+                    return false;
+                }
+                """
+            )
+            checks.append(
+                Check(
+                    "DXF import flow: interior holes render distinctly (hole-stroke pixels found)",
+                    hole_pixel_found,
+                )
+            )
 
             # --- Flow 3: beam analysis ---
             page.fill("#input-length", "1000")

@@ -6,6 +6,10 @@ and compares Area, Ixx, Iyy, and J to hand/textbook values within a small
 tolerance:
 
 - A plain rectangle (b x d): exact closed-form formulas.
+- A rectangle with a centered square hole (build step 8): the hole shares
+  the outer rectangle's centroid, so Area/Ixx/Iyy subtract directly
+  (hole's own second moment, no parallel-axis term needed) -- an exact
+  closed-form check of analyze_section's `holes` parameter.
 - A standard doubly-symmetric I-beam: Area/Ixx/Iyy from the sum-of-rectangles
   method (exact for a sharp-cornered I with no fillets); J from the standard
   open thin-walled sum of b*t^3/3 over the three rectangular segments (a
@@ -127,6 +131,30 @@ def run() -> list[Check]:
         Check(
             "Rectangle 50x100", "Mass/len",
             MATERIAL.density * rect_expected["area"] * 1e-6, rect_result.mass_per_length, 1e-3,
+        ),
+    ]
+
+    # --- Rectangle with a centered square hole (build step 8): b=50, d=100
+    # outer, 20x20 hole centered -> hole shares the outer's centroid, so
+    # Ixx/Iyy subtract directly (no parallel-axis term needed). ---
+    b, d = 50.0, 100.0
+    hole_side = 20.0
+    cx, cy = b / 2, d / 2
+    hs = hole_side / 2
+    hole_vertices = [(cx - hs, cy - hs), (cx + hs, cy - hs), (cx + hs, cy + hs), (cx - hs, cy + hs)]
+    holed_result = analyze_section(
+        rectangle_vertices(b, d), MATERIAL, mesh_size=0.5, holes=[hole_vertices]
+    )
+    holed_area = b * d - hole_side**2
+    holed_ixx = b * d**3 / 12 - hole_side**4 / 12
+    holed_iyy = d * b**3 / 12 - hole_side**4 / 12
+    checks += [
+        Check("Rect 50x100 w/ 20x20 hole", "Area", holed_area, holed_result.area, 1e-3),
+        Check("Rect 50x100 w/ 20x20 hole", "Ixx", holed_ixx, holed_result.ixx, 1e-3),
+        Check("Rect 50x100 w/ 20x20 hole", "Iyy", holed_iyy, holed_result.iyy, 1e-3),
+        Check(
+            "Rect 50x100 w/ 20x20 hole", "Mass/len",
+            MATERIAL.density * holed_area * 1e-6, holed_result.mass_per_length, 1e-3,
         ),
     ]
 

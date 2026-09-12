@@ -135,6 +135,9 @@ def _resolve_material(material_name: str | None, material: MaterialSpec | None) 
 
 class SectionRequest(BaseModel):
     vertices: list[Vertex]
+    holes: list[list[Vertex]] | None = Field(
+        None, description="Interior loops (mm) fully enclosed in `vertices`, subtracted from the section"
+    )
     material_name: str | None = Field(None, description="Look up a material from materials.json")
     material: MaterialSpec | None = Field(None, description="...or supply one inline")
     mesh_size: float | None = None
@@ -149,6 +152,11 @@ class DxfLoopInfo(BaseModel):
 class SectionResponse(BaseModel):
     section_id: str = Field(description="Pass this as section_id in a later POST /beam call")
     vertices: list[Vertex] = Field(description="Echoed back so the frontend can redraw the profile (e.g. after a DXF import)")
+    holes: list[list[Vertex]] = Field(
+        default_factory=list,
+        description="Interior loops (mm) subtracted from the section, echoed back so the "
+        "frontend can redraw them distinctly from the outer profile",
+    )
     dxf_warnings: list[str] = Field(
         default_factory=list,
         description="Repairs ezdxf.recover made while loading a DXF file (empty for non-DXF input, or a clean file)",
@@ -156,8 +164,8 @@ class SectionResponse(BaseModel):
     dxf_loops: list[DxfLoopInfo] | None = Field(
         None,
         description="Every closed loop found in an imported DXF, outer and interior alike "
-        "(null for non-DXF input). The largest becomes `vertices`; interior loops "
-        "(holes) are reported but not yet subtracted -- see dxf_outer_loop_index.",
+        "(null for non-DXF input). The largest becomes `vertices`; loops fully "
+        "contained within it become `holes` -- see dxf_outer_loop_index.",
     )
     dxf_outer_loop_index: int | None = Field(
         None, description="Index into dxf_loops that became `vertices` (null for non-DXF input)"
@@ -193,6 +201,7 @@ class SectionResponse(BaseModel):
         section_id: str,
         vertices: list[Vertex],
         result: SectionResult,
+        holes: list[list[Vertex]] | None = None,
         dxf_warnings: list[str] | None = None,
         dxf_loops: list[DxfLoopInfo] | None = None,
         dxf_outer_loop_index: int | None = None,
@@ -200,6 +209,7 @@ class SectionResponse(BaseModel):
         return cls(
             section_id=section_id,
             vertices=vertices,
+            holes=holes or [],
             dxf_warnings=dxf_warnings or [],
             dxf_loops=dxf_loops,
             dxf_outer_loop_index=dxf_outer_loop_index,
@@ -217,23 +227,30 @@ def _run_section_analysis(
     vertices: list[Vertex],
     material: Material,
     mesh_size: float | None,
+    holes: list[list[Vertex]] | None = None,
     dxf_warnings: list[str] | None = None,
     dxf_loops: list[DxfLoopInfo] | None = None,
     dxf_outer_loop_index: int | None = None,
 ) -> SectionResponse:
     try:
-        result = analyze_section(vertices, material, mesh_size=mesh_size)
+        result = analyze_section(vertices, material, mesh_size=mesh_size, holes=holes)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     return SectionResponse.from_result(
-        _store_section(result), vertices, result, dxf_warnings, dxf_loops, dxf_outer_loop_index
+        _store_section(result),
+        vertices,
+        result,
+        holes,
+        dxf_warnings,
+        dxf_loops,
+        dxf_outer_loop_index,
     )
 
 
 @app.post("/section", response_model=SectionResponse)
 def post_section(req: SectionRequest) -> SectionResponse:
     material = _resolve_material(req.material_name, req.material)
-    return _run_section_analysis(req.vertices, material, req.mesh_size)
+    return _run_section_analysis(req.vertices, material, req.mesh_size, holes=req.holes)
 
 
 @app.post("/section/from-dxf", response_model=SectionResponse)
@@ -261,6 +278,7 @@ async def post_section_from_dxf(
         dxf_result.vertices,
         material,
         mesh_size,
+        holes=dxf_result.holes,
         dxf_warnings=dxf_result.warnings,
         dxf_loops=dxf_loops,
         dxf_outer_loop_index=dxf_result.outer_loop_index,
@@ -334,6 +352,7 @@ class PointLoadModel(BaseModel):
 
 class SectionInput(BaseModel):
     vertices: list[Vertex]
+    holes: list[list[Vertex]] | None = None
     mesh_size: float | None = None
 
 
@@ -407,7 +426,10 @@ def post_beam(req: BeamRequest) -> BeamResponse:
         assert req.section is not None
         try:
             section = analyze_section(
-                req.section.vertices, material, mesh_size=req.section.mesh_size
+                req.section.vertices,
+                material,
+                mesh_size=req.section.mesh_size,
+                holes=req.section.holes,
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc

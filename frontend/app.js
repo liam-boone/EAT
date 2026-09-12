@@ -10,6 +10,7 @@ const FIT_PADDING_FACTOR = 1.2; // 20% margin around a fitted profile
 
 const state = {
   points: [],           // [{x, y}] mm, engineering coords (y up)
+  holes: [],             // [[{x, y}, ...], ...] interior loops, e.g. from a multi-loop DXF import
   isClosed: false,
   materials: [],
   selectedMaterial: null,
@@ -311,6 +312,28 @@ function drawPolygon() {
     ctx.fillStyle = state.isClosed ? "#D5FD5F" : isFirst ? "#D5FD5F" : "#F3F5FF";
     ctx.fill();
   });
+
+  if (state.isClosed) {
+    state.holes.forEach(drawHole);
+  }
+}
+
+/** Interior loops (e.g. bores, T-slot channels from a multi-loop DXF
+ * import) render as a cut-out: filled with the canvas background color
+ * so they visually punch through the outer profile's lime fill, with a
+ * neutral (non-accent) stroke so they read as distinct from the outer
+ * boundary. Display-only -- manual hole sketching isn't supported yet. */
+function drawHole(holePoints) {
+  if (holePoints.length === 0) return;
+  const screenPts = holePoints.map((p) => worldToScreen(p.x, p.y));
+  ctx.beginPath();
+  screenPts.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
+  ctx.closePath();
+  ctx.fillStyle = "#0A1233";
+  ctx.fill();
+  ctx.strokeStyle = "#8D95C4";
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
 }
 
 /* ------------------------------------------------------------------
@@ -387,6 +410,7 @@ function undo() {
   if (state.points.length === 0) return;
   if (state.isClosed) {
     state.isClosed = false;
+    state.holes = [];
     invalidateSection();
     fitViewToPolygon([]); // back to the default sketching view
     layoutCanvas();
@@ -407,6 +431,7 @@ function closeLoop() {
 
 function clearSketch() {
   state.points = [];
+  state.holes = [];
   state.isClosed = false;
   invalidateSection();
   fitViewToPolygon([]);
@@ -467,6 +492,7 @@ async function computeSection() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         vertices: state.points.map((p) => [p.x, p.y]),
+        holes: state.holes.map((loop) => loop.map((p) => [p.x, p.y])),
         material_name: state.selectedMaterial,
       }),
     });
@@ -534,6 +560,7 @@ dxfFileInput.addEventListener("change", async () => {
   try {
     const body = await apiFetch("/section/from-dxf", { method: "POST", body: formData });
     state.points = body.vertices.map(([x, y]) => ({ x, y }));
+    state.holes = (body.holes || []).map((loop) => loop.map(([x, y]) => ({ x, y })));
     state.isClosed = true;
     state.sectionId = body.section_id;
     fitViewToPolygon(state.points);

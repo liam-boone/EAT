@@ -13,9 +13,10 @@ step 4).
 3. Arc-bulge discretization: a stadium shape (two straight sides, two
    semicircular bulge ends) imports with an area within a documented
    tolerance of the exact analytic value (rectangle + full circle).
-4. Multi-loop recognition: two disjoint closed rectangles in one file
-   are now valid input (this used to be rejected) -- both loops are
-   found and reported, with the larger selected as the outer profile.
+4. Multi-loop recognition: two disjoint closed rectangles (neither
+   containing the other) are rejected -- step 8 tightens step 7's
+   "any extra loop is valid multi-loop input" to "any extra loop must
+   be a fully-enclosed hole."
 5. Out-of-scope cases still fail clearly: a dangling (unclosed) chain,
    and an unsupported entity type (SPLINE).
 6. The real catalog file, eat/fixtures/20X40_KJN992891.dxf, which
@@ -24,9 +25,15 @@ step 4).
    module docstring): confirms it now imports via ezdxf.recover with
    its repairs surfaced as warnings (not silently swallowed), reports
    its actual loop structure (1 outer + 3 interior loops -- two
-   symmetric round bores and a central T-slot channel, all reported
-   without being processed as holes yet, which is step 8's job), and
-   confirms the outer profile analyzes successfully.
+   symmetric round bores and a central T-slot channel), classifies all
+   3 interior loops as holes fully contained in the outer boundary, and
+   confirms the outer-minus-holes section analyzes to the corrected
+   (smaller) Area/Ixx/Iyy -- see eat.verify_api's plausibility check
+   against published 20x40 T-slot extrusion mass-per-length figures.
+7. Hole classification (build step 8): a hole fully contained in the
+   outer boundary is subtracted; a loop that pokes outside the outer
+   boundary (not fully contained) is rejected with a specific,
+   loop-naming error rather than guessed at.
 
 Run with: python -m eat.verify_dxf
 """
@@ -44,7 +51,7 @@ from eat.dxf_io import DEFAULT_CHORD_TOLERANCE, DxfImportError, export_polygon, 
 from eat.section import Material, analyze_section
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
-MATERIAL = Material(name="6061-T6", E=68900, nu=0.33, yield_strength=276)
+MATERIAL = Material(name="6063-T6", E=68900, nu=0.33, yield_strength=214, density=2700)
 
 REAL_CATALOG_FILE = FIXTURES_DIR / "20X40_KJN992891.dxf"
 
@@ -162,9 +169,14 @@ def check_arc_bulge_discretization(tmp_dir: Path) -> list[Check]:
 
 
 def check_multi_loop_recognition(tmp_dir: Path) -> list[Check]:
-    """Two disjoint closed rectangles used to be rejected outright
-    ("expected exactly one entity"); they're now valid multi-loop input,
-    same mechanism the real catalog file below needs."""
+    """Two disjoint closed rectangles (neither containing the other): step
+    7 treated this as valid multi-loop input (both reported, larger as
+    outer, smaller un-processed). Step 8 tightens that -- every non-outer
+    loop must now be a fully-enclosed hole to be meaningful input, so a
+    disjoint "interior" loop is out of scope and must be rejected with a
+    clear reason, same as check_hole_classification's poking-outside
+    case below. (The valid multi-loop case -- a loop that IS a proper
+    hole -- is covered there instead.)"""
     doc = ezdxf.new(dxfversion="R2010")
     doc.units = ezdxf.units.MM
     msp = doc.modelspace()
@@ -175,17 +187,88 @@ def check_multi_loop_recognition(tmp_dir: Path) -> list[Check]:
     path = tmp_dir / "two_loops.dxf"
     doc.saveas(path)
 
-    result = import_polygon(path)
-    checks = [Check("Multi-loop: two disjoint loops both found", len(result.loops) == 2)]
-    if len(result.loops) == 2:
-        areas = sorted(l.area for l in result.loops)
-        checks.append(Check("Multi-loop: areas match (100 and 900 mm^2)", _rel_close(areas[0], 100) and _rel_close(areas[1], 900)))
+    checks = []
+    try:
+        import_polygon(path)
+        checks.append(Check("Multi-loop: two disjoint (non-hole) loops are rejected", False, "no exception raised"))
+    except DxfImportError as exc:
+        msg = str(exc)
         checks.append(
             Check(
-                "Multi-loop: larger loop selected as outer profile",
-                _rel_close(result.loops[result.outer_loop_index].area, 900),
+                "Multi-loop: two disjoint (non-hole) loops are rejected",
+                "not fully contained" in msg,
+                msg,
             )
         )
+    return checks
+
+
+def check_hole_classification(tmp_dir: Path) -> list[Check]:
+    """A loop fully inside the outer boundary becomes a hole; a loop that
+    pokes outside it (here, a "hole" whose bbox extends past the outer
+    rectangle's right edge) is out of v1's scope and must fail clearly,
+    naming which loop and why -- not silently guessed at or dropped."""
+    checks: list[Check] = []
+
+    # Case A: a real hole, fully contained -- 50x30 outer, 10x10 hole
+    # centered inside it.
+    doc = ezdxf.new(dxfversion="R2010")
+    doc.units = ezdxf.units.MM
+    msp = doc.modelspace()
+    outer = msp.add_lwpolyline([(0, 0), (50, 0), (50, 30), (0, 30)])
+    outer.closed = True
+    hole = msp.add_lwpolyline([(20, 10), (30, 10), (30, 20), (20, 20)])
+    hole.closed = True
+    contained_path = tmp_dir / "contained_hole.dxf"
+    doc.saveas(contained_path)
+
+    result = import_polygon(contained_path)
+    checks.append(Check("Hole classification: 2 loops found", len(result.loops) == 2))
+    checks.append(
+        Check(
+            "Hole classification: contained loop becomes a hole",
+            len(result.holes) == 1 and result.hole_loop_indices != [],
+            f"holes={result.holes}",
+        )
+    )
+    if result.holes:
+        section = analyze_section(result.vertices, MATERIAL, mesh_size=0.5, holes=result.holes)
+        expected_area = 50 * 30 - 10 * 10
+        checks.append(
+            Check(
+                "Hole classification: outer-minus-hole area matches analytic value",
+                _rel_close(section.area, expected_area),
+                f"expected={expected_area}, actual={section.area}",
+            )
+        )
+
+    # Case B: malformed -- "hole" pokes outside the outer boundary's right
+    # edge (outer spans x=0..50, this loop spans x=40..60).
+    doc2 = ezdxf.new(dxfversion="R2010")
+    doc2.units = ezdxf.units.MM
+    msp2 = doc2.modelspace()
+    outer2 = msp2.add_lwpolyline([(0, 0), (50, 0), (50, 30), (0, 30)])
+    outer2.closed = True
+    poking = msp2.add_lwpolyline([(40, 10), (60, 10), (60, 20), (40, 20)])
+    poking.closed = True
+    malformed_path = tmp_dir / "hole_pokes_outside.dxf"
+    doc2.saveas(malformed_path)
+
+    try:
+        import_polygon(malformed_path)
+        checks.append(
+            Check("Hole classification: not-fully-contained loop is rejected", False, "no exception raised")
+        )
+    except DxfImportError as exc:
+        msg = str(exc)
+        checks.append(
+            Check(
+                "Hole classification: not-fully-contained loop is rejected",
+                "not fully contained" in msg,
+                msg,
+            )
+        )
+
     return checks
 
 
@@ -286,17 +369,62 @@ def check_real_catalog_file() -> list[Check]:
             )
         )
 
+    checks.append(
+        Check(
+            "All 3 interior loops classified as holes (fully contained in outer boundary)",
+            len(result.holes) == 3,
+            f"{len(result.holes)} holes",
+        )
+    )
+
     try:
-        section = analyze_section(result.vertices, MATERIAL, mesh_size=0.5)
+        outer_only = analyze_section(result.vertices, MATERIAL, mesh_size=0.5)
+        with_holes = analyze_section(result.vertices, MATERIAL, mesh_size=0.5, holes=result.holes)
+        outer_area = result.loops[result.outer_loop_index].area
+        total_hole_area = sum(l.area for i, l in enumerate(result.loops) if i in result.hole_loop_indices)
+        expected_holed_area = outer_area - total_hole_area
+
+        print(
+            f"  Corrected (outer - holes) section: Area={with_holes.area:.4f} mm^2 "
+            f"(solid-outer estimate was {outer_only.area:.4f} mm^2), "
+            f"Ixx={with_holes.ixx:.6g} mm^4, Iyy={with_holes.iyy:.6g} mm^4, "
+            f"Mass/len={with_holes.mass_per_length:.4f} kg/m (density=2700 kg/m^3, 6063-T6)\n"
+        )
+
         checks.append(
             Check(
-                "Outer profile analyzes successfully (holes not yet subtracted -- step 8)",
-                _rel_close(section.area, result.loops[result.outer_loop_index].area, tol=1e-2),
-                f"section.area={section.area}",
+                "Outer-minus-holes profile analyzes successfully",
+                True,
+            )
+        )
+        checks.append(
+            Check(
+                "Corrected Area matches outer-area-minus-hole-areas",
+                _rel_close(with_holes.area, expected_holed_area, tol=1e-2),
+                f"expected={expected_holed_area:.4f}, actual={with_holes.area:.4f}",
+            )
+        )
+        checks.append(
+            Check(
+                "Corrected Area is smaller than the solid-outer (pre-step-8) estimate",
+                with_holes.area < outer_only.area,
+                f"corrected={with_holes.area:.4f}, solid-outer={outer_only.area:.4f}",
+            )
+        )
+        checks.append(
+            Check(
+                "Mass/length is a plausible 20x40 T-slot extrusion figure (0.6-1.2 kg/m)",
+                0.6 <= with_holes.mass_per_length <= 1.2,
+                f"{with_holes.mass_per_length:.4f} kg/m -- rough plausibility check, not an "
+                "exact-match requirement. 8020's 20-2040 (20x40mm, six open T-slots -- "
+                "matching this file's 4-loop structure) publishes 0.793 kg/m, which this "
+                "figure lands within ~2% of; a lighter single-slot V-slot-style 20x40 design "
+                "would instead run ~0.35-0.45 kg/m, so the published figure depends heavily "
+                "on which specific 20x40 profile family a given catalog file is.",
             )
         )
     except Exception as exc:  # noqa: BLE001 -- want to see any failure here, not just ValueError
-        checks.append(Check("Outer profile analyzes successfully", False, str(exc)))
+        checks.append(Check("Outer-minus-holes profile analyzes successfully", False, str(exc)))
 
     return checks
 
@@ -311,6 +439,7 @@ def main() -> int:
             + check_roundtrip(tmp_dir)
             + check_arc_bulge_discretization(tmp_dir)
             + check_multi_loop_recognition(tmp_dir)
+            + check_hole_classification(tmp_dir)
             + check_rejects_out_of_scope(tmp_dir)
             + check_real_catalog_file()
         )
