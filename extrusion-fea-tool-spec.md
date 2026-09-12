@@ -86,6 +86,20 @@ engineering-formula tool built on real section geometry.
   - A built-in reference: 20x40 KJN-series aluminum extrusion
   - Any DXF the user has analyzed, selectable as the baseline going forward,
     so all subsequent comparisons are made against it
+- **PDF engineering drawing import**: upload a PDF of an engineering drawing
+  and extract the 2D profile and length directly, rather than requiring a
+  DXF. Likely needs a stronger model (Opus) given the vision/interpretation
+  work involved
+- **DFM / stiffness improvement suggestions**: given an analyzed profile,
+  suggest changes for increased stiffness and better manufacturability,
+  grounded in actual extrusion design best practices (e.g. wall thickness
+  uniformity, rib placement, avoiding sharp internal corners) rather than
+  generic advice
+
+## Release checklist (do at actual v1 release, not before)
+- Update `README.md` to remove/rewrite the "v1 scope boundaries" framing —
+  this stops being an in-progress-build note and becomes the real feature
+  list once this is actually released as v1
 
 ## Open items to decide once you start building
 - Sign/direction convention for loads and axes (recommend fixing this early
