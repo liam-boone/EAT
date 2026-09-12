@@ -1,5 +1,6 @@
-# Build steps 1-3: section engine, material list, beam engine.
-# Later build steps (DXF, API, frontend) will add ezdxf, fastapi, uvicorn,
-# etc. here as they land.
+# Build steps 1-4: section engine, material list, beam engine, DXF I/O.
+# Later build steps (API, frontend) will add fastapi, uvicorn, etc. here
+# as they land.
 sectionproperties>=3.10,<4
 numpy>=1.26
+ezdxf>=1.4,<2
