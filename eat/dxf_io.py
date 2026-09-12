@@ -29,6 +29,7 @@ Or from the command line:
 from __future__ import annotations
 
 import argparse
+import io
 import json
 from pathlib import Path
 
@@ -100,13 +101,7 @@ def _vertices_from_polyline(entity) -> list[tuple[float, float]]:
     return vertices
 
 
-def import_polygon(path: str | Path) -> list[tuple[float, float]]:
-    """Extract a single closed polygon's vertices (mm) from a DXF file.
-
-    Raises `DxfImportError` with a specific reason if the file doesn't
-    contain exactly one closed, straight-edged LWPOLYLINE/POLYLINE.
-    """
-    doc = ezdxf.readfile(str(path))
+def _import_polygon_from_doc(doc, source_label: str) -> list[tuple[float, float]]:
     _check_units(doc)
 
     msp = doc.modelspace()
@@ -114,11 +109,13 @@ def import_polygon(path: str | Path) -> list[tuple[float, float]]:
 
     if len(entities) != 1:
         if len(entities) == 0:
-            raise DxfImportError(f"'{path}' has no entities in modelspace — nothing to import.")
+            raise DxfImportError(
+                f"'{source_label}' has no entities in modelspace — nothing to import."
+            )
         descriptions = ", ".join(_describe_entity(e) for e in entities)
         raise DxfImportError(
             f"Expected exactly one closed polygon entity, found {len(entities)} entities in "
-            f"'{path}': {descriptions}. v1 supports a single closed/open profile only — "
+            f"'{source_label}': {descriptions}. v1 supports a single closed/open profile only — "
             "remove the extra geometry or split it into separate files."
         )
 
@@ -130,16 +127,42 @@ def import_polygon(path: str | Path) -> list[tuple[float, float]]:
         vertices = _vertices_from_polyline(entity)
     else:
         raise DxfImportError(
-            f"Expected a closed LWPOLYLINE or POLYLINE, found a {dxftype} entity in '{path}'. "
-            "Only simple closed polylines are supported in v1."
+            f"Expected a closed LWPOLYLINE or POLYLINE, found a {dxftype} entity in "
+            f"'{source_label}'. Only simple closed polylines are supported in v1."
         )
 
     if len(vertices) < 3:
         raise DxfImportError(
-            f"The closed polyline in '{path}' has only {len(vertices)} vertices; a polygon "
-            "needs at least 3."
+            f"The closed polyline in '{source_label}' has only {len(vertices)} vertices; a "
+            "polygon needs at least 3."
         )
     return vertices
+
+
+def import_polygon(path: str | Path) -> list[tuple[float, float]]:
+    """Extract a single closed polygon's vertices (mm) from a DXF file.
+
+    Raises `DxfImportError` with a specific reason if the file doesn't
+    parse as DXF, or doesn't contain exactly one closed, straight-edged
+    LWPOLYLINE/POLYLINE.
+    """
+    try:
+        doc = ezdxf.readfile(str(path))
+    except ezdxf.DXFError as exc:
+        raise DxfImportError(f"'{path}' is not a valid DXF file: {exc}") from exc
+    return _import_polygon_from_doc(doc, source_label=str(path))
+
+
+def import_polygon_from_text(
+    dxf_text: str, source_label: str = "<uploaded file>"
+) -> list[tuple[float, float]]:
+    """Same as `import_polygon`, but from DXF file content already in memory
+    (e.g. an uploaded file's bytes, decoded), avoiding a temp-file round trip."""
+    try:
+        doc = ezdxf.read(io.StringIO(dxf_text))
+    except ezdxf.DXFError as exc:
+        raise DxfImportError(f"'{source_label}' is not a valid DXF file: {exc}") from exc
+    return _import_polygon_from_doc(doc, source_label=source_label)
 
 
 def export_polygon(
