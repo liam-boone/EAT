@@ -44,6 +44,8 @@ const materialSelect = document.getElementById("material-select");
 const sectionResultsEl = document.getElementById("section-results");
 const sectionResultGridPrimary = document.getElementById("section-result-grid-primary");
 const sectionResultGridSecondary = document.getElementById("section-result-grid-secondary");
+const solidFillComparisonEl = document.getElementById("solid-fill-comparison");
+const solidFillGrid = document.getElementById("solid-fill-grid");
 
 const beamInputsEl = document.getElementById("beam-inputs");
 const inputLength = document.getElementById("input-length");
@@ -231,7 +233,54 @@ function render() {
   ctx.fillRect(0, 0, w, h);
 
   drawGrid(w, h);
+  drawAxisIndicator(w, h);
   drawPolygon();
+}
+
+/** Small fixed corner gizmo showing which screen direction is +X / +Y --
+ * always visible regardless of pan/zoom (unlike the origin gridlines,
+ * which only draw when the origin itself is in view). Must match the
+ * same world axes eat.beam's load-axis selector bends about: worldToScreen
+ * maps +x to the right and +y up on screen, so the arms point the same
+ * way. Kept thin/small (drafting-table aesthetic) so it doesn't compete
+ * with the profile -- tucked in the bottom-left, above the coord readout. */
+function drawAxisIndicator(w, h) {
+  const originX = MARGIN_PX + 10;
+  const originY = h - MARGIN_PX - 44;
+  const armLength = 26;
+  const arrowSize = 5;
+
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.22)";
+  ctx.fillStyle = "rgba(255, 255, 255, 0.22)";
+
+  drawAxisArm(originX, originY, originX + armLength, originY, arrowSize); // +X: right
+  drawAxisArm(originX, originY, originX, originY - armLength, arrowSize); // +Y: up
+
+  ctx.fillStyle = "#8D95C4";
+  ctx.font =
+    "10px -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  ctx.fillText("X", originX + armLength + 6, originY);
+  ctx.textAlign = "center";
+  ctx.textBaseline = "alphabetic";
+  ctx.fillText("Y", originX, originY - armLength - 6);
+}
+
+function drawAxisArm(x0, y0, x1, y1, arrowSize) {
+  ctx.beginPath();
+  ctx.moveTo(x0 + 0.5, y0 + 0.5);
+  ctx.lineTo(x1 + 0.5, y1 + 0.5);
+  ctx.stroke();
+
+  const angle = Math.atan2(y1 - y0, x1 - x0);
+  ctx.beginPath();
+  ctx.moveTo(x1, y1);
+  ctx.lineTo(x1 - arrowSize * Math.cos(angle - Math.PI / 6), y1 - arrowSize * Math.sin(angle - Math.PI / 6));
+  ctx.lineTo(x1 - arrowSize * Math.cos(angle + Math.PI / 6), y1 - arrowSize * Math.sin(angle + Math.PI / 6));
+  ctx.closePath();
+  ctx.fill();
 }
 
 function drawGrid(w, h) {
@@ -535,6 +584,58 @@ function renderSectionResults(r) {
   resultRow(sectionResultGridSecondary, "EIxx", fmtNum(r.ei_xx), "N·mm²");
   resultRow(sectionResultGridSecondary, "EIyy", fmtNum(r.ei_yy), "N·mm²");
   resultRow(sectionResultGridSecondary, "GJ", fmtNum(r.gj), "N·mm²");
+
+  renderSolidFillComparison(r);
+}
+
+/** Shows what the same outer boundary's properties would be with its
+ * holes ignored (fully filled) -- a quick read on how much the material
+ * removal costs in stiffness/mass vs. what it saves in weight. Reuses
+ * POST /section (and hence eat.section.analyze_section) on just the
+ * outer `vertices`, no new engineering. Skipped entirely for a hole-free
+ * profile, since there's nothing to compare against. */
+async function renderSolidFillComparison(r) {
+  if (!r.holes || r.holes.length === 0) {
+    solidFillComparisonEl.hidden = true;
+    solidFillGrid.innerHTML = "";
+    return;
+  }
+  try {
+    const solid = await apiFetch("/section", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        vertices: r.vertices,
+        material_name: state.selectedMaterial,
+      }),
+    });
+    solidFillGrid.innerHTML = "";
+    solidFillRow(solidFillGrid, "Area", r.area, solid.area, "mm²");
+    solidFillRow(solidFillGrid, "Ixx", r.ixx, solid.ixx, "mm⁴");
+    solidFillRow(solidFillGrid, "Iyy", r.iyy, solid.iyy, "mm⁴");
+    if (r.mass_per_length !== null && solid.mass_per_length !== null) {
+      solidFillRow(solidFillGrid, "Mass Per Length", r.mass_per_length, solid.mass_per_length, "kg/m");
+    }
+    solidFillComparisonEl.hidden = false;
+  } catch (err) {
+    // Best-effort extra: don't surface the main error banner over this.
+    solidFillComparisonEl.hidden = true;
+    solidFillGrid.innerHTML = "";
+  }
+}
+
+/** One comparison row: hollow value -> solid-fill value, and the percent
+ * change filling the holes back in would make (positive = solid is
+ * larger, i.e. what the material removal is costing you). */
+function solidFillRow(grid, label, hollowValue, solidValue, unit) {
+  const pct = solidValue !== 0 ? ((solidValue - hollowValue) / solidValue) * 100 : 0;
+  const sign = pct >= 0 ? "+" : "";
+  resultRow(
+    grid,
+    label,
+    `${fmtNum(hollowValue)} → ${fmtNum(solidValue)} (${sign}${fmtNum(pct, { digits: 1 })}%)`,
+    unit
+  );
 }
 
 /* ------------------------------------------------------------------

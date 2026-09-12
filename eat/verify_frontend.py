@@ -20,6 +20,26 @@ renders what comes back, for three flows:
    |P|*L^3/(48*E*Ixx) for 6061's actual E, and both charts rendered an SVG
    path.
 
+Also checks two smaller additions to the sketch canvas / results panel:
+
+- Axis indicator: a fixed corner gizmo on the sketch canvas showing which
+  screen direction is +X / +Y. Verified via a confined pixel scan (mirrors
+  app.js's `drawAxisIndicator` geometry, same technique as `canvas_point()`
+  below) confirming the arm line + label color render to the *right* of
+  the gizmo's origin for X and *above* it for Y -- not just that something
+  renders, but that the two axes aren't swapped, since that convention
+  must match eat.beam's load-axis selector (Y bends about Ixx / screen-up,
+  X bends about Iyy / screen-right) exactly.
+- Solid-fill comparison ("More Info"): for the holes-bearing KJN fixture,
+  confirms the frontend's extra POST /section (outer boundary, no holes)
+  matches an independent `eat.section.analyze_section` call on the same
+  outer vertices (not re-verifying the section engine itself, already
+  done in verify_section.py / verify_dxf.py -- just confirming the
+  frontend calls the right endpoint with the right payload), and that its
+  Area lands on step 7's already-established ~489.81 mm^2 outer-loop
+  figure. Also confirms the comparison is skipped (hidden) entirely for
+  the hole-free rectangle from flow 1.
+
 Also captures a full-page screenshot (saved under the path given on the
 command line, or eat/verify_frontend_screenshot.png by default) and checks
 the browser console for errors.
@@ -37,6 +57,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
+
+from eat.materials import get_material
+from eat.section import analyze_section
 
 PORT = 8799
 BASE_URL = f"http://127.0.0.1:{PORT}"
@@ -174,6 +197,72 @@ def main() -> int:
             more_info_open = page.locator(".more-info").get_attribute("open")
             checks.append(Check("Sketch flow: 'More Info' is collapsed by default", more_info_open is None))
 
+            solid_fill_hidden = page.locator("#solid-fill-comparison").evaluate("el => el.hidden")
+            checks.append(
+                Check(
+                    "Sketch flow: solid-fill comparison hidden for a hole-free profile",
+                    solid_fill_hidden is True,
+                )
+            )
+
+            # Axis indicator: a fixed corner gizmo, independent of pan/zoom.
+            # Mirrors drawAxisIndicator()'s own geometry (reading the live
+            # MARGIN_PX constant from the page, same technique as
+            # canvas_point() below) and scans two separate, narrow bands --
+            # one running right from the gizmo's origin, one running up --
+            # so a swapped X/Y convention would fail this even though
+            # "something renders in the corner" would not catch it.
+            axis_regions = page.evaluate(
+                """
+                (marginPx) => {
+                    const canvas = document.getElementById('sketch-canvas');
+                    const ctx = canvas.getContext('2d');
+                    const dpr = window.devicePixelRatio || 1;
+                    const cssHeight = canvas.height / dpr;
+                    const originX = marginPx + 10;
+                    const originY = cssHeight - marginPx - 44;
+                    const armLength = 26;
+
+                    function scanBox(cssX0, cssY0, cssX1, cssY1) {
+                        const x0 = Math.max(0, Math.floor(cssX0 * dpr));
+                        const y0 = Math.max(0, Math.floor(cssY0 * dpr));
+                        const x1 = Math.min(canvas.width, Math.ceil(cssX1 * dpr));
+                        const y1 = Math.min(canvas.height, Math.ceil(cssY1 * dpr));
+                        const data = ctx.getImageData(x0, y0, Math.max(1, x1 - x0), Math.max(1, y1 - y0)).data;
+                        let line = false, label = false;
+                        for (let i = 0; i < data.length; i += 4) {
+                            const r = data[i], g = data[i + 1], b = data[i + 2], a = data[i + 3];
+                            if (a > 50 && Math.abs(r - 64) < 25 && Math.abs(g - 70) < 25 && Math.abs(b - 96) < 25) line = true;
+                            if (a > 50 && Math.abs(r - 141) < 40 && Math.abs(g - 149) < 40 && Math.abs(b - 196) < 40) label = true;
+                        }
+                        return { line, label };
+                    }
+
+                    return {
+                        // Right of origin, thin vertical band: the +X arm/label.
+                        xRegion: scanBox(originX, originY - 8, originX + armLength + 22, originY + 8),
+                        // Above origin, thin horizontal band: the +Y arm/label.
+                        yRegion: scanBox(originX - 8, originY - armLength - 22, originX + 8, originY + 8),
+                    };
+                }
+                """,
+                MARGIN_PX,
+            )
+            checks.append(
+                Check(
+                    "Axis indicator: +X arm and 'X' label render to the right of the gizmo origin",
+                    axis_regions["xRegion"]["line"] and axis_regions["xRegion"]["label"],
+                    f"{axis_regions['xRegion']}",
+                )
+            )
+            checks.append(
+                Check(
+                    "Axis indicator: +Y arm and 'Y' label render above the gizmo origin",
+                    axis_regions["yRegion"]["line"] and axis_regions["yRegion"]["label"],
+                    f"{axis_regions['yRegion']}",
+                )
+            )
+
             # --- Flow 2: DXF import ---
             page.click("#btn-clear")
             captured.pop("/section", None)
@@ -208,6 +297,63 @@ def main() -> int:
                         f"{len(dxf_resp.get('holes', []))} holes",
                     )
                 )
+
+            # Solid-fill comparison ("More Info"): the frontend fires an
+            # extra POST /section (outer boundary only, no holes) once it
+            # sees holes.length > 0, independent of whether the <details>
+            # is actually expanded -- wait for it to land rather than
+            # relying on the earlier #section-results wait, which resolves
+            # before this fire-and-forget fetch necessarily completes.
+            # state="attached" (not the default "visible"): the element's
+            # own `hidden` attribute is what's under test here, and it sits
+            # inside a collapsed <details> that's never opened in this
+            # flow, which would otherwise make it fail a visibility wait
+            # regardless of its own hidden state.
+            page.wait_for_selector("#solid-fill-comparison:not([hidden])", state="attached", timeout=5000)
+            solid_resp = captured.get("/section")
+            checks.append(
+                Check("DXF import flow: solid-fill comparison's POST /section captured", solid_resp is not None)
+            )
+            if solid_resp and dxf_resp:
+                outer_vertices = [tuple(p) for p in dxf_resp["vertices"]]
+                expected_solid = analyze_section(outer_vertices, get_material("6061-T6 Aluminum (Extruded)"))
+                checks.append(
+                    Check(
+                        "Solid-fill comparison: Area matches outer-loop-alone calc "
+                        "(~489.81 mm^2, step 7's pre-hole-subtraction figure)",
+                        _rel_close(solid_resp["area"], expected_solid.area, tol=1e-6)
+                        and _rel_close(solid_resp["area"], 489.81, tol=1e-3),
+                        f"area={solid_resp['area']}",
+                    )
+                )
+                checks.append(
+                    Check(
+                        "Solid-fill comparison: Ixx/Iyy match an independent analyze_section call "
+                        "on the same outer vertices",
+                        _rel_close(solid_resp["ixx"], expected_solid.ixx, tol=1e-6)
+                        and _rel_close(solid_resp["iyy"], expected_solid.iyy, tol=1e-6),
+                        f"ixx={solid_resp['ixx']} (expected {expected_solid.ixx}), "
+                        f"iyy={solid_resp['iyy']} (expected {expected_solid.iyy})",
+                    )
+                )
+                checks.append(
+                    Check(
+                        "Solid-fill comparison: Area/Ixx/Iyy exceed the holes-subtracted values "
+                        "(filling the holes back in can only add material)",
+                        solid_resp["area"] > dxf_resp["area"]
+                        and solid_resp["ixx"] > dxf_resp["ixx"]
+                        and solid_resp["iyy"] > dxf_resp["iyy"],
+                    )
+                )
+            row_count = page.locator("#solid-fill-grid dt").count()
+            checks.append(
+                Check(
+                    "Solid-fill comparison: rendered (Area/Ixx/Iyy/Mass rows)",
+                    row_count == 4,
+                    f"{row_count} rows",
+                )
+            )
+
             checks.append(
                 Check(
                     "DXF import flow: profile shows as closed",
