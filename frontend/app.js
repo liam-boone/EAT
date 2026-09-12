@@ -650,11 +650,27 @@ function renderSectionResults(r) {
   refreshSuggestions(r);
 }
 
+// Monotonically increasing token guarding refreshSuggestions against a
+// stale (out-of-order) response landing after a newer profile has already
+// been requested -- see that function's own comment for why this is
+// needed and not just defensive.
+let suggestionsRequestId = 0;
+
 /** Fetches the DFM / stiffness suggestions for whatever profile is
  * displayed. Like the solid-fill and baseline comparisons, this is always
  * a fresh derived lookup rather than part of any stored result, so it
- * runs for reloaded history entries too. */
+ * runs for reloaded history entries too.
+ *
+ * Not awaited by its caller (renderSectionResults), so two calls can be
+ * in flight at once -- e.g. sketch profile A, close the loop, then
+ * immediately Clear and sketch profile B before A's /suggestions request
+ * resolves. Without the token guard below, A's response landing after
+ * B's would append A's (now-stale) findings onto B's already-rendered
+ * list, showing suggestions for a profile that's no longer on screen.
+ * Confirmed as a real, reproducible bug (not just a theoretical race)
+ * during review, via a delayed-response test. */
 async function refreshSuggestions(r) {
+  const requestId = ++suggestionsRequestId;
   state.highlight = null;
   state.pinnedSuggestion = null;
   suggestionListEl.innerHTML = "";
@@ -664,13 +680,16 @@ async function refreshSuggestions(r) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ section: { vertices: r.vertices, holes: r.holes || [] } }),
     });
+    if (requestId !== suggestionsRequestId) return; // a newer profile has since been requested
     suggestionsCountEl.textContent = found.length ? `${found.length}` : "none";
     suggestionsEmptyEl.hidden = found.length > 0;
+    suggestionListEl.innerHTML = "";
     found.forEach((suggestion, index) => {
       suggestionListEl.appendChild(renderSuggestion(suggestion, index));
     });
     suggestionsSectionEl.hidden = false;
   } catch (err) {
+    if (requestId !== suggestionsRequestId) return;
     suggestionsSectionEl.hidden = true;
   }
 }
