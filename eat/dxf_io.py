@@ -165,10 +165,11 @@ def import_polygon_from_text(
     return _import_polygon_from_doc(doc, source_label=source_label)
 
 
-def export_polygon(
-    vertices: list[tuple[float, float]], path: str | Path, layer: str = "EAT_PROFILE"
-) -> None:
-    """Write a closed polygon (mm) to a DXF file as a closed LWPOLYLINE."""
+def export_polygon_to_text(
+    vertices: list[tuple[float, float]], layer: str = "EAT_PROFILE"
+) -> str:
+    """Build DXF file content (as text) for a closed polygon, without
+    touching disk -- used for the API's download endpoint."""
     if len(vertices) < 3:
         raise ValueError("A polygon needs at least 3 vertices")
 
@@ -180,7 +181,17 @@ def export_polygon(
     polyline = msp.add_lwpolyline(vertices, dxfattribs={"layer": layer})
     polyline.closed = True
 
-    doc.saveas(str(path))
+    buf = io.StringIO()
+    doc.write(buf)
+    return buf.getvalue()
+
+
+def export_polygon(
+    vertices: list[tuple[float, float]], path: str | Path, layer: str = "EAT_PROFILE"
+) -> None:
+    """Write a closed polygon (mm) to a DXF file as a closed LWPOLYLINE."""
+    text = export_polygon_to_text(vertices, layer=layer)
+    Path(path).write_text(text)
 
 
 def _main(argv: list[str] | None = None) -> int:

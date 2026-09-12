@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>EAT · Extrusion Analysis Tool</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22><rect width=%2216%22 height=%2216%22 fill=%22%230F1A45%22/><rect x=%224%22 y=%224%22 width=%228%22 height=%228%22 fill=%22none%22 stroke=%22%23D5FD5F%22 stroke-width=%221.5%22/></svg>" />
+<link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar__brand">
+    <span class="topbar__mark" aria-hidden="true"></span>
+    <span class="topbar__title">EAT</span>
+    <span class="topbar__subtitle">Extrusion Analysis Tool</span>
+  </div>
+  <div class="topbar__actions">
+    <input type="file" id="dxf-file-input" accept=".dxf" hidden />
+    <button type="button" class="btn btn--ghost" id="btn-import-dxf">Import DXF</button>
+  </div>
+</header>
+
+<div id="error-banner" class="error-banner" hidden role="alert">
+  <span class="error-banner__text" id="error-banner-text"></span>
+  <button type="button" class="error-banner__close" id="error-banner-close" aria-label="Dismiss error">&times;</button>
+</div>
+
+<main class="layout">
+
+  <section class="panel panel--sketch" aria-labelledby="sketch-heading">
+    <h2 id="sketch-heading" class="panel__title">Sketch</h2>
+    <div class="canvas-well">
+      <canvas id="sketch-canvas" width="640" height="480" tabindex="0" aria-label="Polygon sketch area. Click to place vertices."></canvas>
+      <div class="coord-readout" id="coord-readout" hidden>0.0, 0.0 mm</div>
+    </div>
+    <div class="sketch-toolbar">
+      <button type="button" class="btn" id="btn-undo" disabled>Undo point</button>
+      <button type="button" class="btn" id="btn-close-loop" disabled>Close loop</button>
+      <button type="button" class="btn" id="btn-clear" disabled>Clear</button>
+      <span class="sketch-toolbar__spacer"></span>
+      <button type="button" class="btn btn--ghost" id="btn-export-dxf" disabled>Export DXF</button>
+    </div>
+    <p class="hint" id="sketch-hint">Click on the grid to place the first vertex of your profile.</p>
+  </section>
+
+  <section class="panel panel--controls" aria-labelledby="material-heading">
+    <h2 id="material-heading" class="panel__title">Setup</h2>
+    <div class="field">
+      <label for="material-select" class="field__label">Material</label>
+      <select id="material-select" class="select" disabled>
+        <option value="">Loading materials&hellip;</option>
+      </select>
+    </div>
+
+    <div id="section-results" class="results" hidden>
+      <h3 class="panel__subtitle">Section results</h3>
+      <dl class="result-grid" id="section-result-grid"></dl>
+    </div>
+
+    <div id="beam-inputs" class="beam-inputs" hidden>
+      <h3 class="panel__subtitle">Length &amp; loads <span class="optional-tag">optional</span></h3>
+
+      <div class="field-row">
+        <div class="field">
+          <label for="input-length" class="field__label">Length (mm)</label>
+          <input type="number" id="input-length" class="input" min="1" step="any" placeholder="1000" />
+        </div>
+        <div class="field">
+          <label for="input-bc" class="field__label">Boundary condition</label>
+          <select id="input-bc" class="select">
+            <option value="simply_supported">Simply supported</option>
+            <option value="fixed_fixed">Fixed&ndash;fixed</option>
+            <option value="fixed_free">Fixed&ndash;free (cantilever)</option>
+            <option value="fixed_pinned">Fixed&ndash;pinned</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="field">
+        <span class="field__label">Point loads</span>
+        <div id="point-loads-list" class="point-loads-list"></div>
+        <button type="button" class="btn btn--small" id="btn-add-load">+ Add load</button>
+      </div>
+
+      <div class="field">
+        <label for="input-axial" class="field__label">Axial load (N) <span class="optional-tag">optional, for buckling safety factor</span></label>
+        <input type="number" id="input-axial" class="input" step="any" placeholder="e.g. 5000" />
+      </div>
+
+      <button type="button" class="btn btn--accent btn--block" id="btn-analyze-beam">&#9654; Analyze beam</button>
+    </div>
+  </section>
+
+  <section class="panel panel--beam-results" id="beam-results" aria-labelledby="beam-results-heading" hidden>
+    <h2 id="beam-results-heading" class="panel__title">Beam results</h2>
+
+    <dl class="result-grid result-grid--summary" id="beam-summary-grid"></dl>
+
+    <div class="charts">
+      <div class="chart-container">
+        <h3 class="chart-title">Bending stress along length</h3>
+        <div id="chart-stress" class="chart"></div>
+      </div>
+      <div class="chart-container">
+        <h3 class="chart-title">Deflection curve</h3>
+        <div id="chart-deflection" class="chart"></div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<script src="/app.js"></script>
+</body>
+</html>

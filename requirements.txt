@@ -1,6 +1,6 @@
-# Build steps 1-5: section engine, material list, beam engine, DXF I/O,
-# FastAPI layer. The frontend (last step) needs nothing further here —
-# it's served by this same backend.
+# Build steps 1-6: section engine, material list, beam engine, DXF I/O,
+# FastAPI layer, frontend (plain HTML/CSS/JS, served as static files by
+# the same backend -- no build step, no extra dependency here).
 sectionproperties>=3.10,<4
 numpy>=1.26
 ezdxf>=1.4,<2
@@ -10,3 +10,7 @@ python-multipart>=0.0.9,<1
 
 # Only needed to run eat/verify_api.py (FastAPI's TestClient).
 httpx>=0.27,<1
+
+# Only needed to run eat/verify_frontend.py (headless-browser UI check).
+# After installing, also run once: playwright install chromium
+playwright>=1.40,<2

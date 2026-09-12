@@ -29,3 +29,6 @@ ENV/
 
 # Claude Code local settings (machine-specific permissions)
 .claude/settings.local.json
+
+# Generated verification artifact (eat/verify_frontend.py), not source
+eat/verify_frontend_screenshot.png

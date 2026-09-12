@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
-# Sets up the virtual environment on first run, then starts the EAT API
-# server and opens it in the default browser.
-#
-# No frontend exists yet (that's the last build step) — this opens the
-# auto-generated API docs at /docs, which is the only usable UI today.
-# Once the frontend lands, this script will point at it instead.
+# Sets up the virtual environment on first run, then starts the EAT
+# server and opens the app in the default browser.
 set -e
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
@@ -28,6 +24,6 @@ if [ ! -d "$VENV_DIR" ]; then
 fi
 
 # Open the browser shortly after the server has had time to start.
-( sleep 1.5 && (open "http://127.0.0.1:8000/docs" 2>/dev/null || xdg-open "http://127.0.0.1:8000/docs" 2>/dev/null || true) ) &
+( sleep 1.5 && (open "http://127.0.0.1:8000/" 2>/dev/null || xdg-open "http://127.0.0.1:8000/" 2>/dev/null || true) ) &
 
 exec "$VENV_DIR/bin/uvicorn" eat.api:app --host 127.0.0.1 --port 8000

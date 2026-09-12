@@ -23,13 +23,15 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import asdict
+from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 
 from eat.beam import BeamResult, BoundaryCondition, PointLoad, analyze_beam
-from eat.dxf_io import DxfImportError, import_polygon_from_text
+from eat.dxf_io import DxfImportError, export_polygon_to_text, import_polygon_from_text
 from eat.materials import (
     add_material,
     delete_material,
@@ -140,6 +142,7 @@ class SectionRequest(BaseModel):
 
 class SectionResponse(BaseModel):
     section_id: str = Field(description="Pass this as section_id in a later POST /beam call")
+    vertices: list[Vertex] = Field(description="Echoed back so the frontend can redraw the profile (e.g. after a DXF import)")
     material: str
     area: float
     perimeter: float
@@ -164,8 +167,10 @@ class SectionResponse(BaseModel):
     gj: float
 
     @classmethod
-    def from_result(cls, section_id: str, result: SectionResult) -> "SectionResponse":
-        return cls(section_id=section_id, **asdict(result))
+    def from_result(
+        cls, section_id: str, vertices: list[Vertex], result: SectionResult
+    ) -> "SectionResponse":
+        return cls(section_id=section_id, vertices=vertices, **asdict(result))
 
 
 def _store_section(result: SectionResult) -> str:
@@ -181,7 +186,7 @@ def _run_section_analysis(
         result = analyze_section(vertices, material, mesh_size=mesh_size)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    return SectionResponse.from_result(_store_section(result), result)
+    return SectionResponse.from_result(_store_section(result), vertices, result)
 
 
 @app.post("/section", response_model=SectionResponse)
@@ -214,6 +219,23 @@ async def post_section_from_dxf(
         raise HTTPException(400, str(exc)) from exc
 
     return _run_section_analysis(vertices, material, mesh_size)
+
+
+class ExportDxfRequest(BaseModel):
+    vertices: list[Vertex]
+
+
+@app.post("/section/to-dxf")
+def post_section_to_dxf(req: ExportDxfRequest) -> Response:
+    try:
+        text = export_polygon_to_text(req.vertices)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return Response(
+        content=text,
+        media_type="application/dxf",
+        headers={"Content-Disposition": 'attachment; filename="profile.dxf"'},
+    )
 
 
 # --- Material list endpoints -------------------------------------------------
@@ -311,6 +333,10 @@ class BeamResponse(BaseModel):
     euler_buckling_load: float
     axial_load: float | None
     buckling_safety_factor: float | None
+    diagram_x: list[float]
+    moment_diagram: list[float]
+    bending_stress_diagram: list[float]
+    deflection_diagram: list[float]
 
     @classmethod
     def from_result(cls, result: BeamResult) -> "BeamResponse":
@@ -357,21 +383,12 @@ def post_beam(req: BeamRequest) -> BeamResponse:
     return BeamResponse.from_result(result)
 
 
-@app.get("/")
-def root() -> dict:
-    return {
-        "name": "Extrusion Analysis Tool API",
-        "docs": "/docs",
-        "endpoints": [
-            "POST /section",
-            "POST /section/from-dxf",
-            "GET /materials",
-            "POST /materials",
-            "PUT /materials/{name}",
-            "DELETE /materials/{name}",
-            "POST /beam",
-        ],
-    }
+# Frontend static files (build step 6). Mounted last and at "/" so it acts
+# as a catch-all: requests to routes declared above (e.g. /section,
+# /materials, /docs) still match those first -- only otherwise-unmatched
+# paths fall through to serving frontend/index.html or its assets.
+_FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
+app.mount("/", StaticFiles(directory=_FRONTEND_DIR, html=True), name="frontend")
 
 
 if __name__ == "__main__":

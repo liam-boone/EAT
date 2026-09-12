@@ -1,10 +1,6 @@
 @echo off
-REM Sets up the virtual environment on first run, then starts the EAT API
-REM server and opens it in the default browser.
-REM
-REM No frontend exists yet (that's the last build step) -- this opens the
-REM auto-generated API docs at /docs, which is the only usable UI today.
-REM Once the frontend lands, this script will point at it instead.
+REM Sets up the virtual environment on first run, then starts the EAT
+REM server and opens the app in the default browser.
 setlocal
 
 cd /d "%~dp0"
@@ -25,7 +21,7 @@ if not exist "%VENV_DIR%\Scripts\python.exe" (
 )
 
 REM Open the browser shortly after the server has had time to start.
-start "" cmd /c "timeout /t 2 >nul && start "" "http://127.0.0.1:8000/docs""
+start "" cmd /c "timeout /t 2 >nul && start "" "http://127.0.0.1:8000/""
 
 "%VENV_DIR%\Scripts\uvicorn" eat.api:app --host 127.0.0.1 --port 8000
 

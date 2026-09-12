@@ -113,6 +113,15 @@ class BeamResult:
     axial_load: float | None  # N
     buckling_safety_factor: float | None  # euler_buckling_load / axial_load
 
+    # Sampled curves for charting (e.g. the frontend's SVG plots), all
+    # evaluated from the same exact closed-form functions as the max-value
+    # fields above -- not a separate/approximate computation. diagram_x is
+    # shared across the other three parallel arrays.
+    diagram_x: list[float]  # mm
+    moment_diagram: list[float]  # N.mm, same length as diagram_x
+    bending_stress_diagram: list[float]  # MPa (magnitude), same length as diagram_x
+    deflection_diagram: list[float]  # mm, same length as diagram_x
+
     def summary(self) -> str:
         lines = [
             f"Boundary condition : {self.boundary_condition}",
@@ -270,6 +279,7 @@ def analyze_beam(
     point_loads: list[PointLoad],
     axial_load: float | None = None,
     deflection_grid_points: int = 4001,
+    diagram_points: int = 121,
 ) -> BeamResult:
     """Analyze a single-span beam under transverse point loads.
 
@@ -349,6 +359,11 @@ def analyze_beam(
         Reaction(label_right, length, total_R_right, total_M_right),
     ]
 
+    diagram_x = np.union1d(np.linspace(0.0, length, diagram_points), np.array(load_positions))
+    diagram_m = total_m(diagram_x)
+    diagram_stress = np.abs(diagram_m) / z_worst
+    diagram_v = total_v(diagram_x)
+
     return BeamResult(
         boundary_condition=bc.value,
         length=length,
@@ -365,6 +380,10 @@ def analyze_beam(
         euler_buckling_load=euler_buckling_load,
         axial_load=axial_load,
         buckling_safety_factor=buckling_safety_factor,
+        diagram_x=diagram_x.tolist(),
+        moment_diagram=diagram_m.tolist(),
+        bending_stress_diagram=diagram_stress.tolist(),
+        deflection_diagram=diagram_v.tolist(),
     )
 
 
