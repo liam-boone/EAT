@@ -152,13 +152,34 @@ def main() -> int:
                         f"area={section_resp['area']}, ixx={section_resp['ixx']}, iyy={section_resp['iyy']}",
                     )
                 )
-            dt_count = page.locator("#section-result-grid dt").count()
-            checks.append(Check("Sketch flow: results panel rendered rows", dt_count >= 10, f"{dt_count} rows"))
+            primary_count = page.locator("#section-result-grid-primary dt").count()
+            checks.append(
+                Check(
+                    "Sketch flow: trimmed primary results rendered (Area/Centroid/Ixx/Iyy/Izz/Mass)",
+                    primary_count == 6,
+                    f"{primary_count} rows",
+                )
+            )
+            secondary_count = page.locator("#section-result-grid-secondary dt").count()
+            checks.append(
+                Check(
+                    "Sketch flow: 'More Info' secondary results rendered",
+                    secondary_count >= 10,
+                    f"{secondary_count} rows",
+                )
+            )
+            more_info_open = page.locator(".more-info").get_attribute("open")
+            checks.append(Check("Sketch flow: 'More Info' is collapsed by default", more_info_open is None))
 
             # --- Flow 2: DXF import ---
             page.click("#btn-clear")
             captured.pop("/section", None)
-            fixture = PROJECT_ROOT / "eat" / "fixtures" / "rectangle_50x100.dxf"
+            # Use the real catalog file, not the rectangle: it's centered at
+            # the origin with negative coordinates (bbox x:[-20,20],
+            # y:[-10,10]) -- exactly the case that rendered off in a corner
+            # under the old fixed view assumption. The rectangle fixture
+            # starts at (0,0) and wouldn't actually exercise the fix.
+            fixture = PROJECT_ROOT / "eat" / "fixtures" / "20X40_KJN992891.dxf"
             page.set_input_files("#dxf-file-input", str(fixture))
             page.wait_for_selector("#section-results:not([hidden])", timeout=5000)
 
@@ -167,11 +188,9 @@ def main() -> int:
             if dxf_resp:
                 checks.append(
                     Check(
-                        "DXF import flow: Area/Ixx/Iyy match step-1 exactly",
-                        _rel_close(dxf_resp["area"], 5000.0)
-                        and _rel_close(dxf_resp["ixx"], 4166666.6666666665)
-                        and _rel_close(dxf_resp["iyy"], 1041666.6666666666),
-                        f"area={dxf_resp['area']}, ixx={dxf_resp['ixx']}, iyy={dxf_resp['iyy']}",
+                        "DXF import flow: outer-loop Area matches step-7 value",
+                        _rel_close(dxf_resp["area"], 489.81, tol=1e-3),
+                        f"area={dxf_resp['area']}",
                     )
                 )
             checks.append(
@@ -180,6 +199,53 @@ def main() -> int:
                     page.locator("#btn-close-loop").is_disabled() and not page.locator("#btn-export-dxf").is_disabled(),
                 )
             )
+
+            # Pixel-level check that the imported profile is actually
+            # centered on the canvas, not clustered in a corner: find the
+            # bounding box of accent-colored pixels (the confirmed-profile
+            # fill/stroke color) and confirm its center falls near the
+            # canvas's own center.
+            pixel_bbox = page.evaluate(
+                """
+                () => {
+                    const canvas = document.getElementById('sketch-canvas');
+                    const ctx = canvas.getContext('2d');
+                    const w = canvas.width, h = canvas.height;
+                    const data = ctx.getImageData(0, 0, w, h).data;
+                    let minX = w, minY = h, maxX = 0, maxY = 0, found = false;
+                    for (let y = 0; y < h; y += 2) {
+                        for (let x = 0; x < w; x += 2) {
+                            const i = (y * w + x) * 4;
+                            const r = data[i], g = data[i + 1], b = data[i + 2], a = data[i + 3];
+                            if (a > 50 && r > 180 && g > 220 && b < 150) {
+                                found = true;
+                                if (x < minX) minX = x;
+                                if (x > maxX) maxX = x;
+                                if (y < minY) minY = y;
+                                if (y > maxY) maxY = y;
+                            }
+                        }
+                    }
+                    return found ? { minX, minY, maxX, maxY, canvasW: w, canvasH: h } : null;
+                }
+                """
+            )
+            if pixel_bbox is None:
+                checks.append(Check("DXF import flow: profile is centered on canvas", False, "no accent pixels found"))
+            else:
+                shape_cx = (pixel_bbox["minX"] + pixel_bbox["maxX"]) / 2
+                shape_cy = (pixel_bbox["minY"] + pixel_bbox["maxY"]) / 2
+                canvas_cx = pixel_bbox["canvasW"] / 2
+                canvas_cy = pixel_bbox["canvasH"] / 2
+                off_x = abs(shape_cx - canvas_cx) / pixel_bbox["canvasW"]
+                off_y = abs(shape_cy - canvas_cy) / pixel_bbox["canvasH"]
+                checks.append(
+                    Check(
+                        "DXF import flow: profile is centered on canvas (not in a corner)",
+                        off_x < 0.15 and off_y < 0.15,
+                        f"shape center offset from canvas center: {off_x:.1%} x, {off_y:.1%} y",
+                    )
+                )
 
             # --- Flow 3: beam analysis ---
             page.fill("#input-length", "1000")

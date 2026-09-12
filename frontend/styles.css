@@ -242,6 +242,7 @@ button, input, select {
   left: var(--space-2);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
+  line-height: 1.2; /* body's global line-height: 1.5 otherwise inflates this badge vertically */
   color: var(--text-secondary);
   background: rgba(10, 18, 51, 0.85);
   border: 1px solid var(--border-subtle);
@@ -484,6 +485,45 @@ dd.sf-good {
   font-size: var(--text-xs);
   color: var(--text-secondary);
   font-variant-numeric: tabular-nums;
+}
+
+/* --- Collapsible "More Info" section --------------------------------- */
+
+.more-info {
+  margin-top: var(--space-4);
+}
+
+.more-info summary {
+  cursor: pointer;
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-secondary);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border-subtle);
+  list-style: none;
+}
+
+.more-info summary::-webkit-details-marker {
+  display: none;
+}
+
+.more-info summary::before {
+  content: "▸";
+  display: inline-block;
+  margin-right: var(--space-2);
+}
+
+.more-info[open] summary::before {
+  content: "▾";
+}
+
+.more-info summary:hover {
+  color: var(--text-primary);
+}
+
+.more-info .result-grid {
+  margin-top: var(--space-3);
 }
 
 /* --- Charts ---------------------------------------------------------- */

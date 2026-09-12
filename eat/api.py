@@ -170,6 +170,7 @@ class SectionResponse(BaseModel):
     ixx: float
     iyy: float
     ixy: float
+    izz: float = Field(description="Polar moment about centroidal z-axis (= ixx + iyy), mm^4")
     j: float
     iw: float
     x_sc: float
@@ -184,6 +185,7 @@ class SectionResponse(BaseModel):
     ei_xx: float
     ei_yy: float
     gj: float
+    mass_per_length: float | None = Field(description="kg/m; null if the material has no density")
 
     @classmethod
     def from_result(

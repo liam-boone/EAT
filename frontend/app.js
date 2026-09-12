@@ -4,6 +4,10 @@
    State
 ------------------------------------------------------------------ */
 
+const DEFAULT_VIEW_WIDTH_MM = 300; // sketching-mode view width before anything is closed
+const MIN_VIEW_WIDTH_MM = 20; // floor so a tiny imported profile doesn't zoom in absurdly
+const FIT_PADDING_FACTOR = 1.2; // 20% margin around a fitted profile
+
 const state = {
   points: [],           // [{x, y}] mm, engineering coords (y up)
   isClosed: false,
@@ -11,7 +15,9 @@ const state = {
   selectedMaterial: null,
   sectionId: null,
   pointLoads: [{ position_fraction: 0.5, magnitude: -1000 }],
-  viewWidthMm: 300,      // how many mm of width the sketch grid shows
+  viewWidthMm: DEFAULT_VIEW_WIDTH_MM, // how many mm of width the sketch grid shows
+  viewOriginX: 0,        // world x mapped to the left margin
+  viewOriginY: 0,        // world y mapped to the bottom margin
   pixelsPerMm: 1,        // recomputed on layout/resize
 };
 
@@ -35,7 +41,8 @@ const sketchHint = document.getElementById("sketch-hint");
 const materialSelect = document.getElementById("material-select");
 
 const sectionResultsEl = document.getElementById("section-results");
-const sectionResultGrid = document.getElementById("section-result-grid");
+const sectionResultGridPrimary = document.getElementById("section-result-grid-primary");
+const sectionResultGridSecondary = document.getElementById("section-result-grid-secondary");
 
 const beamInputsEl = document.getElementById("beam-inputs");
 const inputLength = document.getElementById("input-length");
@@ -106,6 +113,19 @@ function fmtNum(n, { digits } = {}) {
   return n.toLocaleString("en-US", { maximumFractionDigits });
 }
 
+/** Title-cases short backend-sourced labels (e.g. beam.py's reaction
+ * labels: "Fixed support (x=0)" -> "Fixed Support (x=0)") without
+ * touching tokens that aren't pure alphabetic words -- coordinates like
+ * "(x=0)" or "(x=L)" pass through untouched. Not a general-purpose title
+ * caser (no small-word exceptions); fine for this fixed set of short
+ * technical labels. */
+function titleCaseLabel(text) {
+  return text
+    .split(" ")
+    .map((word) => (/^[A-Za-z]+$/.test(word) ? word.charAt(0).toUpperCase() + word.slice(1) : word))
+    .join(" ");
+}
+
 function resultRow(grid, label, value, unit) {
   const dt = document.createElement("dt");
   dt.textContent = label;
@@ -148,16 +168,52 @@ function layoutCanvas() {
 
 function worldToScreen(wx, wy) {
   return {
-    x: MARGIN_PX + wx * state.pixelsPerMm,
-    y: state.cssHeight - MARGIN_PX - wy * state.pixelsPerMm,
+    x: MARGIN_PX + (wx - state.viewOriginX) * state.pixelsPerMm,
+    y: state.cssHeight - MARGIN_PX - (wy - state.viewOriginY) * state.pixelsPerMm,
   };
 }
 
 function screenToWorld(sx, sy) {
   return {
-    x: (sx - MARGIN_PX) / state.pixelsPerMm,
-    y: (state.cssHeight - MARGIN_PX - sy) / state.pixelsPerMm,
+    x: (sx - MARGIN_PX) / state.pixelsPerMm + state.viewOriginX,
+    y: (state.cssHeight - MARGIN_PX - sy) / state.pixelsPerMm + state.viewOriginY,
   };
+}
+
+/** Center the view on `points`' bounding box with padding, or reset to the
+ * default sketching view if there are none. Shared by both the manual
+ * close-loop path and DXF import -- neither had this before; a manually
+ * sketched polygon just happened to sit inside the old fixed 0-300mm
+ * window because that's where the visible grid was. */
+function fitViewToPolygon(points) {
+  if (points.length === 0) {
+    state.viewWidthMm = DEFAULT_VIEW_WIDTH_MM;
+    state.viewOriginX = 0;
+    state.viewOriginY = 0;
+    return;
+  }
+  const xs = points.map((p) => p.x);
+  const ys = points.map((p) => p.y);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  const shapeWidth = Math.max(maxX - minX, 1e-6);
+  const shapeHeight = Math.max(maxY - minY, 1e-6);
+
+  // The drawing area's aspect ratio is fixed at 4:3 (viewHeight = viewWidth
+  // * 0.75); pick whichever dimension needs more zoom-out to fit, with
+  // padding, then center the shape's bounding box in that view.
+  const viewWidth = Math.max(
+    shapeWidth * FIT_PADDING_FACTOR,
+    (shapeHeight * FIT_PADDING_FACTOR) / 0.75,
+    MIN_VIEW_WIDTH_MM
+  );
+  const viewHeight = viewWidth * 0.75;
+
+  state.viewWidthMm = viewWidth;
+  state.viewOriginX = (minX + maxX) / 2 - viewWidth / 2;
+  state.viewOriginY = (minY + maxY) / 2 - viewHeight / 2;
 }
 
 /* ------------------------------------------------------------------
@@ -179,39 +235,53 @@ function render() {
 
 function drawGrid(w, h) {
   const minorMm = 10;
-  const majorMm = 50;
+  const majorEvery = 5; // every 5th minor line (50mm) is drawn heavier
+  const viewHeightMm = state.viewWidthMm * 0.75;
+  const viewMinX = state.viewOriginX;
+  const viewMaxX = state.viewOriginX + state.viewWidthMm;
+  const viewMinY = state.viewOriginY;
+  const viewMaxY = state.viewOriginY + viewHeightMm;
 
   ctx.lineWidth = 1;
 
-  for (let mm = 0; ; mm += minorMm) {
-    const { x } = worldToScreen(mm, 0);
-    if (x > w - MARGIN_PX + 0.5) break;
-    ctx.strokeStyle = mm % majorMm === 0 ? "rgba(255,255,255,0.14)" : "rgba(255,255,255,0.06)";
+  const startXIdx = Math.floor(viewMinX / minorMm);
+  const endXIdx = Math.ceil(viewMaxX / minorMm);
+  for (let i = startXIdx; i <= endXIdx; i++) {
+    const { x } = worldToScreen(i * minorMm, 0);
+    ctx.strokeStyle = i % majorEvery === 0 ? "rgba(255,255,255,0.14)" : "rgba(255,255,255,0.06)";
     ctx.beginPath();
     ctx.moveTo(Math.round(x) + 0.5, MARGIN_PX);
     ctx.lineTo(Math.round(x) + 0.5, h - MARGIN_PX);
     ctx.stroke();
   }
 
-  for (let mm = 0; ; mm += minorMm) {
-    const { y } = worldToScreen(0, mm);
-    if (y < MARGIN_PX - 0.5) break;
-    ctx.strokeStyle = mm % majorMm === 0 ? "rgba(255,255,255,0.14)" : "rgba(255,255,255,0.06)";
+  const startYIdx = Math.floor(viewMinY / minorMm);
+  const endYIdx = Math.ceil(viewMaxY / minorMm);
+  for (let i = startYIdx; i <= endYIdx; i++) {
+    const { y } = worldToScreen(0, i * minorMm);
+    ctx.strokeStyle = i % majorEvery === 0 ? "rgba(255,255,255,0.14)" : "rgba(255,255,255,0.06)";
     ctx.beginPath();
     ctx.moveTo(MARGIN_PX, Math.round(y) + 0.5);
     ctx.lineTo(w - MARGIN_PX, Math.round(y) + 0.5);
     ctx.stroke();
   }
 
-  // Origin axes, slightly stronger.
-  const origin = worldToScreen(0, 0);
+  // Origin axes, slightly stronger -- only if the origin is actually in view.
   ctx.strokeStyle = "rgba(255,255,255,0.22)";
-  ctx.beginPath();
-  ctx.moveTo(MARGIN_PX, Math.round(origin.y) + 0.5);
-  ctx.lineTo(w - MARGIN_PX, Math.round(origin.y) + 0.5);
-  ctx.moveTo(Math.round(origin.x) + 0.5, MARGIN_PX);
-  ctx.lineTo(Math.round(origin.x) + 0.5, h - MARGIN_PX);
-  ctx.stroke();
+  if (viewMinY <= 0 && 0 <= viewMaxY) {
+    const { y } = worldToScreen(0, 0);
+    ctx.beginPath();
+    ctx.moveTo(MARGIN_PX, Math.round(y) + 0.5);
+    ctx.lineTo(w - MARGIN_PX, Math.round(y) + 0.5);
+    ctx.stroke();
+  }
+  if (viewMinX <= 0 && 0 <= viewMaxX) {
+    const { x } = worldToScreen(0, 0);
+    ctx.beginPath();
+    ctx.moveTo(Math.round(x) + 0.5, MARGIN_PX);
+    ctx.lineTo(Math.round(x) + 0.5, h - MARGIN_PX);
+    ctx.stroke();
+  }
 }
 
 function drawPolygon() {
@@ -262,7 +332,7 @@ function updateToolbarState() {
   } else if (state.points.length < 3) {
     sketchHint.textContent = `${state.points.length} point(s) placed — need at least 3 to close the loop.`;
   } else {
-    sketchHint.textContent = "Click near the first point (or press Close loop) to finish the profile.";
+    sketchHint.textContent = "Click near the first point (or press Close Loop) to finish the profile.";
   }
 }
 
@@ -318,6 +388,8 @@ function undo() {
   if (state.isClosed) {
     state.isClosed = false;
     invalidateSection();
+    fitViewToPolygon([]); // back to the default sketching view
+    layoutCanvas();
   }
   state.points.pop();
   render();
@@ -327,7 +399,8 @@ function undo() {
 function closeLoop() {
   if (state.points.length < 3 || state.isClosed) return;
   state.isClosed = true;
-  render();
+  fitViewToPolygon(state.points);
+  layoutCanvas();
   updateToolbarState();
   computeSection();
 }
@@ -336,7 +409,8 @@ function clearSketch() {
   state.points = [];
   state.isClosed = false;
   invalidateSection();
-  render();
+  fitViewToPolygon([]);
+  layoutCanvas();
   updateToolbarState();
 }
 
@@ -409,23 +483,32 @@ async function computeSection() {
 }
 
 function renderSectionResults(r) {
-  sectionResultGrid.innerHTML = "";
-  resultRow(sectionResultGrid, "Area", fmtNum(r.area), "mm²");
-  resultRow(sectionResultGrid, "Centroid", `${fmtNum(r.cx)}, ${fmtNum(r.cy)}`, "mm");
-  resultRow(sectionResultGrid, "Ixx", fmtNum(r.ixx), "mm⁴");
-  resultRow(sectionResultGrid, "Iyy", fmtNum(r.iyy), "mm⁴");
-  resultRow(sectionResultGrid, "Ixy", fmtNum(r.ixy), "mm⁴");
-  resultRow(sectionResultGrid, "J (torsion)", fmtNum(r.j), "mm⁴");
-  resultRow(sectionResultGrid, "Warping Iw", fmtNum(r.iw), "mm⁶");
-  resultRow(sectionResultGrid, "Shear centre", `${fmtNum(r.x_sc)}, ${fmtNum(r.y_sc)}`, "mm");
-  resultRow(sectionResultGrid, "Zxx (+/-)", `${fmtNum(r.zxx_plus)} / ${fmtNum(r.zxx_minus)}`, "mm³");
-  resultRow(sectionResultGrid, "Zyy (+/-)", `${fmtNum(r.zyy_plus)} / ${fmtNum(r.zyy_minus)}`, "mm³");
-  resultRow(sectionResultGrid, "Sxx (plastic)", fmtNum(r.sxx), "mm³");
-  resultRow(sectionResultGrid, "Syy (plastic)", fmtNum(r.syy), "mm³");
-  resultRow(sectionResultGrid, "EA", fmtNum(r.ea), "N");
-  resultRow(sectionResultGrid, "EIxx", fmtNum(r.ei_xx), "N·mm²");
-  resultRow(sectionResultGrid, "EIyy", fmtNum(r.ei_yy), "N·mm²");
-  resultRow(sectionResultGrid, "GJ", fmtNum(r.gj), "N·mm²");
+  sectionResultGridPrimary.innerHTML = "";
+  resultRow(sectionResultGridPrimary, "Area", fmtNum(r.area), "mm²");
+  resultRow(sectionResultGridPrimary, "Centroid", `${fmtNum(r.cx)}, ${fmtNum(r.cy)}`, "mm");
+  resultRow(sectionResultGridPrimary, "Ixx", fmtNum(r.ixx), "mm⁴");
+  resultRow(sectionResultGridPrimary, "Iyy", fmtNum(r.iyy), "mm⁴");
+  resultRow(sectionResultGridPrimary, "Izz", fmtNum(r.izz), "mm⁴");
+  resultRow(
+    sectionResultGridPrimary,
+    "Mass Per Length",
+    r.mass_per_length === null ? "n/a" : fmtNum(r.mass_per_length),
+    r.mass_per_length === null ? "" : "kg/m"
+  );
+
+  sectionResultGridSecondary.innerHTML = "";
+  resultRow(sectionResultGridSecondary, "Ixy", fmtNum(r.ixy), "mm⁴");
+  resultRow(sectionResultGridSecondary, "J (Torsion)", fmtNum(r.j), "mm⁴");
+  resultRow(sectionResultGridSecondary, "Warping Iw", fmtNum(r.iw), "mm⁶");
+  resultRow(sectionResultGridSecondary, "Shear Centre", `${fmtNum(r.x_sc)}, ${fmtNum(r.y_sc)}`, "mm");
+  resultRow(sectionResultGridSecondary, "Zxx (+/-)", `${fmtNum(r.zxx_plus)} / ${fmtNum(r.zxx_minus)}`, "mm³");
+  resultRow(sectionResultGridSecondary, "Zyy (+/-)", `${fmtNum(r.zyy_plus)} / ${fmtNum(r.zyy_minus)}`, "mm³");
+  resultRow(sectionResultGridSecondary, "Sxx (Plastic)", fmtNum(r.sxx), "mm³");
+  resultRow(sectionResultGridSecondary, "Syy (Plastic)", fmtNum(r.syy), "mm³");
+  resultRow(sectionResultGridSecondary, "EA", fmtNum(r.ea), "N");
+  resultRow(sectionResultGridSecondary, "EIxx", fmtNum(r.ei_xx), "N·mm²");
+  resultRow(sectionResultGridSecondary, "EIyy", fmtNum(r.ei_yy), "N·mm²");
+  resultRow(sectionResultGridSecondary, "GJ", fmtNum(r.gj), "N·mm²");
 }
 
 /* ------------------------------------------------------------------
@@ -453,6 +536,7 @@ dxfFileInput.addEventListener("change", async () => {
     state.points = body.vertices.map(([x, y]) => ({ x, y }));
     state.isClosed = true;
     state.sectionId = body.section_id;
+    fitViewToPolygon(state.points);
     layoutCanvas();
     updateToolbarState();
     renderSectionResults(body);
@@ -627,25 +711,25 @@ function summaryTile(grid, label, value, unit, opts = {}) {
 
 function renderBeamResults(r) {
   beamSummaryGrid.innerHTML = "";
-  summaryTile(beamSummaryGrid, "Max moment", `${fmtNum(r.max_moment)} N·mm`, "", {
+  summaryTile(beamSummaryGrid, "Max Moment", `${fmtNum(r.max_moment)} N·mm`, "", {
     sub: `@ ${fmtNum(r.max_moment_position)}mm`,
   });
-  summaryTile(beamSummaryGrid, "Max bending stress", `${fmtNum(r.max_bending_stress)} MPa`);
+  summaryTile(beamSummaryGrid, "Max Bending Stress", `${fmtNum(r.max_bending_stress)} MPa`);
   summaryTile(
     beamSummaryGrid,
-    "Safety factor",
+    "Safety Factor",
     r.safety_factor === null ? "n/a" : fmtNum(r.safety_factor, { digits: 2 }),
     "",
     { highlight: true, className: safetyFactorClass(r.safety_factor) }
   );
-  summaryTile(beamSummaryGrid, "Max deflection", `${fmtNum(r.max_deflection, { digits: 4 })} mm`, "", {
+  summaryTile(beamSummaryGrid, "Max Deflection", `${fmtNum(r.max_deflection, { digits: 4 })} mm`, "", {
     sub: `@ ${fmtNum(r.max_deflection_position)}mm`,
   });
-  summaryTile(beamSummaryGrid, "Euler buckling load", `${fmtNum(r.euler_buckling_load)} N  (K=${r.effective_length_factor})`);
+  summaryTile(beamSummaryGrid, "Euler Buckling Load", `${fmtNum(r.euler_buckling_load)} N  (K=${r.effective_length_factor})`);
   if (r.buckling_safety_factor !== null) {
     summaryTile(
       beamSummaryGrid,
-      "Buckling safety factor",
+      "Buckling Safety Factor",
       fmtNum(r.buckling_safety_factor, { digits: 2 }),
       "",
       { className: safetyFactorClass(r.buckling_safety_factor) }
@@ -654,15 +738,15 @@ function renderBeamResults(r) {
   r.reactions.forEach((reaction) => {
     summaryTile(
       beamSummaryGrid,
-      reaction.label,
+      titleCaseLabel(reaction.label),
       `${fmtNum(reaction.force)} N, ${fmtNum(reaction.moment)} N·mm`
     );
   });
 
   drawLineChart(chartStressEl, r.diagram_x, r.bending_stress_diagram, {
-    xLabel: "Position along length",
+    xLabel: "Position Along Length",
     xUnit: "mm",
-    yLabel: "Bending stress",
+    yLabel: "Bending Stress",
     yUnit: "MPa",
     markerX: r.max_bending_stress_position,
     markerY: r.max_bending_stress,
@@ -670,7 +754,7 @@ function renderBeamResults(r) {
   });
 
   drawLineChart(chartDeflectionEl, r.diagram_x, r.deflection_diagram, {
-    xLabel: "Position along length",
+    xLabel: "Position Along Length",
     xUnit: "mm",
     yLabel: "Deflection",
     yUnit: "mm",

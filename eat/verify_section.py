@@ -21,7 +21,7 @@ from dataclasses import dataclass
 
 from eat.section import Material, analyze_section
 
-MATERIAL = Material(name="Test Steel", E=200_000, nu=0.3, yield_strength=250)
+MATERIAL = Material(name="Test Steel", E=200_000, nu=0.3, yield_strength=250, density=7850)
 
 
 @dataclass
@@ -121,6 +121,13 @@ def run() -> list[Check]:
         Check("Rectangle 50x100", "Iyy", rect_expected["iyy"], rect_result.iyy, 1e-3),
         # J uses an approximate closed-form series -> looser tolerance
         Check("Rectangle 50x100", "J", rect_expected["j"], rect_result.j, 5e-3),
+        # Izz = Ixx + Iyy (polar moment, perpendicular-axis theorem)
+        Check("Rectangle 50x100", "Izz", rect_expected["ixx"] + rect_expected["iyy"], rect_result.izz, 1e-3),
+        # mass/length = density (kg/m^3) * area (mm^2 -> m^2)
+        Check(
+            "Rectangle 50x100", "Mass/len",
+            MATERIAL.density * rect_expected["area"] * 1e-6, rect_result.mass_per_length, 1e-3,
+        ),
     ]
 
     # --- Standard I-beam (sharp corners): d=200, bf=100, tf=10, tw=6 mm ---
@@ -134,6 +141,11 @@ def run() -> list[Check]:
         # Open thin-walled J is a known approximation (no fillet/warping
         # interaction terms) -> looser tolerance
         Check("I-beam 200x100x10/6", "J", i_expected["j"], i_result.j, 5e-2),
+        Check("I-beam 200x100x10/6", "Izz", i_expected["ixx"] + i_expected["iyy"], i_result.izz, 1e-3),
+        Check(
+            "I-beam 200x100x10/6", "Mass/len",
+            MATERIAL.density * i_expected["area"] * 1e-6, i_result.mass_per_length, 1e-3,
+        ),
     ]
 
     return checks

@@ -60,7 +60,7 @@ class Material:
     ultimate_strength: float | None = None  # MPa
     shear_strength: float | None = None  # MPa
     shear_strength_approximate: bool = False  # True if shear_strength is a rough published figure
-    density: float | None = None  # kg/m^3 (not used by the section engine itself)
+    density: float | None = None  # kg/m^3 (used only for SectionResult.mass_per_length)
 
     def __post_init__(self) -> None:
         if self.nu is None and self.G is None:
@@ -85,6 +85,9 @@ class SectionResult:
     ixx: float  # second moment of area about centroidal x axis, mm^4
     iyy: float
     ixy: float
+    izz: float  # polar second moment of area about centroidal z axis, mm^4
+    # (= ixx + iyy, perpendicular-axis theorem -- NOT the torsion constant j
+    # below, which only coincides with izz for fully axisymmetric sections)
     j: float  # St. Venant torsion constant, mm^4
     iw: float  # warping constant, mm^6
     x_sc: float  # shear centre, global coords
@@ -102,6 +105,8 @@ class SectionResult:
     ei_yy: float  # N.mm^2
     gj: float  # N.mm^2 (torsional stiffness)
 
+    mass_per_length: float | None  # kg/m (density * area); None if material.density unset
+
     def as_dict(self) -> dict:
         return asdict(self)
 
@@ -114,6 +119,7 @@ class SectionResult:
             f"Ixx             = {self.ixx:,.6g} mm^4",
             f"Iyy             = {self.iyy:,.6g} mm^4",
             f"Ixy             = {self.ixy:,.6g} mm^4",
+            f"Izz (polar)     = {self.izz:,.6g} mm^4",
             f"J (torsion)     = {self.j:,.6g} mm^4",
             f"Iw (warping)    = {self.iw:,.6g} mm^6",
             f"Shear centre    = ({self.x_sc:,.4f}, {self.y_sc:,.4f}) mm",
@@ -125,6 +131,8 @@ class SectionResult:
             f"EIxx            = {self.ei_xx:,.6g} N.mm^2",
             f"EIyy            = {self.ei_yy:,.6g} N.mm^2",
             f"GJ              = {self.gj:,.6g} N.mm^2",
+            f"Mass/length     = "
+            + (f"{self.mass_per_length:,.6g} kg/m" if self.mass_per_length is not None else "n/a (no density)"),
         ]
         return "\n".join(lines)
 
@@ -175,16 +183,24 @@ def analyze_section(
     x_sc, y_sc = sec.get_sc()
     zxx_plus, zxx_minus, zyy_plus, zyy_minus = sec.get_z()
     sxx, syy = sec.get_s()
+    area = sec.get_area()
+
+    # mass/length (kg/m) = density (kg/m^3) * area (mm^2 -> m^2, factor 1e-6).
+    # Cross-checked: a solid 50x100mm 6061 bar (density 2700 kg/m^3) gives
+    # 2700 * (5000 * 1e-6) = 13.5 kg/m, matching a hand calc of the same
+    # 0.05m x 0.10m x 1m block's mass.
+    mass_per_length = material.density * area * 1e-6 if material.density is not None else None
 
     return SectionResult(
         material=material.name,
-        area=sec.get_area(),
+        area=area,
         perimeter=sec.get_perimeter(),
         cx=cx,
         cy=cy,
         ixx=ixx,
         iyy=iyy,
         ixy=ixy,
+        izz=ixx + iyy,
         j=sec.get_j(),
         iw=sec.get_gamma(),
         x_sc=x_sc,
@@ -195,10 +211,11 @@ def analyze_section(
         zyy_minus=zyy_minus,
         sxx=sxx,
         syy=syy,
-        ea=material.E * sec.get_area(),
+        ea=material.E * area,
         ei_xx=material.E * ixx,
         ei_yy=material.E * iyy,
         gj=material.G * sec.get_j(),
+        mass_per_length=mass_per_length,
     )
 
 
