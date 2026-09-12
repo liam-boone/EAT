@@ -31,15 +31,29 @@ mm-N-MPa system above and does no further conversion.
 
 ## Load direction convention (`eat.beam`)
 
-Point loads act along the section's local **y-axis** — the same y used in
-the (x, y) polygon vertices passed to `eat.section.analyze_section` — and
-bend the beam about the section's centroidal x-axis (`Ixx`). A positive
-load magnitude acts in the +y direction; by convention (matching how
-beam-deflection tables are normally presented) it produces deflection in
-that same +y direction. Bending moment uses the standard sagging-positive
-statics sign (positive under a simply-supported span's point load; fixed
-supports come out with a negative/hogging reaction moment).
+Each point load acts along one of the section's local in-plane axes — the
+same x/y used in the (x, y) polygon vertices passed to
+`eat.section.analyze_section` — selected via `axis` (`LoadAxis`, default
+**Y**, matching the tool's original convention):
+
+- **Y**: load acts along local y, bends the beam about the centroidal
+  x-axis (`Ixx`), stress governed by `Zxx`.
+- **X**: load acts along local x, bends the beam about the centroidal
+  y-axis (`Iyy`), stress governed by `Zyy`.
+
+All point loads passed to one `analyze_beam` call must share the same
+axis — mixed X/Y (biaxial) bending in a single analysis is out of scope
+for now. A positive load magnitude acts in the +axis direction; by
+convention (matching how beam-deflection tables are normally presented)
+it produces deflection in that same direction. Bending moment uses the
+standard sagging-positive statics sign (positive under a simply-supported
+span's point load; fixed supports come out with a negative/hogging
+reaction moment).
+
+**Axial load** is independent of the transverse load axis above: it
+always acts along the section's long axis (**Z**, the beam's length
+direction), used only for the Euler buckling safety factor.
 
 Loads are assumed to act through the section's shear centre, so no torsion
-is induced — biaxial bending, torsion, and shear-centre offset effects are
-out of scope for v1 (see spec v1 boundaries).
+is induced — true biaxial bending, torsion, and shear-centre offset
+effects are out of scope for v1 (see spec v1 boundaries).

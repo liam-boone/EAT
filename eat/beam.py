@@ -2,9 +2,13 @@
 EAT beam engine — closed-form single-span beam analysis with point loads.
 
 See UNITS.md for the unit system (mm-N-MPa) and the load direction
-convention (loads act along the section's local y-axis, bending about the
-centroidal x-axis / Ixx; loads are assumed to pass through the shear
-centre so no torsion is induced). Reported bending moment uses the
+convention. Point loads act along either the section's local y-axis
+(bending about the centroidal x-axis / Ixx) or its local x-axis (bending
+about the centroidal y-axis / Iyy), selected per-analysis via `LoadAxis`
+(default Y, matching pre-existing behaviour); loads are assumed to pass
+through the shear centre so no torsion is induced. Axial load always acts
+along the section's long axis (Z, the beam's length direction),
+independent of the transverse load axis. Reported bending moment uses the
 standard sagging-positive statics sign (positive under a simply supported
 span's point load); reaction moments at fixed supports come out negative
 (hogging). Deflection is reported positive in the direction of the applied
@@ -58,6 +62,22 @@ class BoundaryCondition(str, Enum):
     FIXED_PINNED = "fixed_pinned"  # x=0 fixed, x=L pinned
 
 
+class LoadAxis(str, Enum):
+    """Which section axis a transverse point load acts along.
+
+    Y (default): load acts along the section's local y-axis, bending it
+    about the centroidal x-axis (Ixx) -- the tool's original convention.
+    X: load acts along the section's local x-axis, bending it about the
+    centroidal y-axis (Iyy). All point loads in one `analyze_beam` call
+    must share the same axis (mixed-axis/biaxial bending is out of scope
+    for now); axial load is unaffected by this choice -- it always acts
+    along the section's long axis (Z).
+    """
+
+    Y = "y"
+    X = "x"
+
+
 # Effective length factors for Euler buckling, Pcr = pi^2 EI / (K L)^2.
 # Fixed-pinned's theoretical value is the root of tan(u) = u (u = 4.4934),
 # K = pi / u = 0.6992..., commonly rounded to 0.7 in textbooks/AISC tables.
@@ -71,15 +91,18 @@ K_FACTOR: dict[BoundaryCondition, float] = {
 
 @dataclass
 class PointLoad:
-    """A transverse point load along the section's local y-axis.
+    """A transverse point load along a section axis (see `LoadAxis`).
 
     `position_fraction` is measured from the x=0 reference end for the
     selected boundary condition (see `BoundaryCondition`), 0 <= f <= 1.
-    `magnitude` is signed, N, positive in the +y direction.
+    `magnitude` is signed, N, positive in the +axis direction.
+    `axis` defaults to Y (the tool's original convention); all point loads
+    passed to one `analyze_beam` call must share the same axis.
     """
 
     position_fraction: float
     magnitude: float
+    axis: LoadAxis = LoadAxis.Y
 
 
 @dataclass
@@ -96,6 +119,8 @@ class BeamResult:
     length: float  # mm
     material: str
     reactions: list[Reaction]
+
+    load_axis: str  # "x" or "y" -- which section axis the point loads bend about (see LoadAxis)
 
     max_moment: float  # N.mm, signed
     max_moment_position: float  # mm
@@ -123,10 +148,12 @@ class BeamResult:
     deflection_diagram: list[float]  # mm, same length as diagram_x
 
     def summary(self) -> str:
+        axis_note = "Ixx (loads along local Y)" if self.load_axis == "y" else "Iyy (loads along local X)"
         lines = [
             f"Boundary condition : {self.boundary_condition}",
             f"Material           : {self.material}",
             f"Length             : {self.length:,.4f} mm",
+            f"Load axis          : {self.load_axis.upper()}, bending about {axis_note}",
             "Reactions:",
         ]
         for r in self.reactions:
@@ -138,7 +165,7 @@ class BeamResult:
             f"Max deflection      = {self.max_deflection:,.6g} mm  at x = {self.max_deflection_position:,.4f} mm",
             f"Effective length K  = {self.effective_length_factor}",
             f"Euler buckling load = {self.euler_buckling_load:,.6g} N",
-            f"Axial load          = {self.axial_load if self.axial_load is not None else 'n/a'}",
+            f"Axial load (Z, along length) = {self.axial_load if self.axial_load is not None else 'n/a'}",
             f"Buckling safety fac.= {self.buckling_safety_factor if self.buckling_safety_factor is not None else 'n/a (no axial load given)'}",
         ]
         return "\n".join(lines)
@@ -286,6 +313,13 @@ def analyze_beam(
     `section` and `material` are typically `eat.section.analyze_section`'s
     result and the `Material` passed to it. See the module docstring and
     UNITS.md for the unit system and sign/direction conventions.
+
+    All `point_loads` must share one `axis` (see `LoadAxis`); that choice
+    selects which section moment of inertia (Ixx or Iyy) and section
+    modulus (Zxx or Zyy) governs bending -- the closed-form solvers below
+    are unchanged either way, only EI and Z are swapped. `axial_load`, if
+    given, is independent of this choice: it always acts along the
+    section's long axis (Z, the beam's length direction).
     """
     bc = BoundaryCondition(boundary_condition)
     if length <= 0:
@@ -293,8 +327,22 @@ def analyze_beam(
     if not point_loads:
         raise ValueError("at least one point load is required")
 
+    load_axes = {LoadAxis(load.axis) for load in point_loads}
+    if len(load_axes) > 1:
+        raise ValueError(
+            "All point loads in one analysis must share the same axis "
+            "(mixed X/Y point loads are not yet supported)."
+        )
+    load_axis = load_axes.pop()
+
     solver = _SINGLE_LOAD_SOLVERS[bc]
-    EI = material.E * section.ixx
+    if load_axis == LoadAxis.X:
+        I_bend = section.iyy
+        z_plus, z_minus = section.zyy_plus, section.zyy_minus
+    else:
+        I_bend = section.ixx
+        z_plus, z_minus = section.zxx_plus, section.zxx_minus
+    EI = material.E * I_bend
 
     total_R_left = total_M_left = total_R_right = total_M_right = 0.0
     m_funcs = []
@@ -330,7 +378,7 @@ def analyze_beam(
     max_moment = float(m_candidates[peak_idx])
     max_moment_position = float(candidate_x[peak_idx])
 
-    z_worst = min(section.zxx_plus, section.zxx_minus)
+    z_worst = min(z_plus, z_minus)
     max_bending_stress = abs(max_moment) / z_worst
     max_bending_stress_position = max_moment_position
 
@@ -369,6 +417,7 @@ def analyze_beam(
         length=length,
         material=material.name,
         reactions=reactions,
+        load_axis=load_axis.value,
         max_moment=max_moment,
         max_moment_position=max_moment_position,
         max_bending_stress=max_bending_stress,
@@ -393,7 +442,7 @@ def _example_json() -> dict:
         "section": {"vertices": [[0, 0], [50, 0], [50, 100], [0, 100]], "mesh_size": None},
         "length": 1000,
         "boundary_condition": "simply_supported",
-        "point_loads": [{"position_fraction": 0.5, "magnitude": -500}],
+        "point_loads": [{"position_fraction": 0.5, "magnitude": -500, "axis": "y"}],
         "axial_load": None,
     }
 

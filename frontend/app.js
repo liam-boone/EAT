@@ -15,7 +15,7 @@ const state = {
   materials: [],
   selectedMaterial: null,
   sectionId: null,
-  pointLoads: [{ position_fraction: 0.5, magnitude: -1000 }],
+  pointLoads: [{ position_fraction: 0.5, magnitude: -1000, axis: "y" }],
   viewWidthMm: DEFAULT_VIEW_WIDTH_MM, // how many mm of width the sketch grid shows
   viewOriginX: 0,        // world x mapped to the left margin
   viewOriginY: 0,        // world y mapped to the bottom margin
@@ -638,6 +638,28 @@ function renderPointLoads() {
       state.pointLoads[idx].magnitude = parseFloat(magInput.value);
     });
 
+    // All point loads in one analysis must share one axis (see
+    // eat.beam.analyze_beam); this per-row select keeps the axis explicit
+    // on the load itself rather than a single header note, and changing
+    // it here re-syncs every other row so the shared-axis invariant holds
+    // without the backend having to reject a mismatched combination.
+    const axisSelect = document.createElement("select");
+    axisSelect.className = "select point-load-row__axis";
+    axisSelect.setAttribute("aria-label", "Load axis");
+    ["y", "x"].forEach((axis) => {
+      const opt = document.createElement("option");
+      opt.value = axis;
+      opt.textContent = axis === "y" ? "Y (bends Ixx)" : "X (bends Iyy)";
+      axisSelect.appendChild(opt);
+    });
+    axisSelect.value = load.axis || "y";
+    axisSelect.addEventListener("change", () => {
+      state.pointLoads.forEach((l) => {
+        l.axis = axisSelect.value;
+      });
+      renderPointLoads();
+    });
+
     const removeBtn = document.createElement("button");
     removeBtn.type = "button";
     removeBtn.className = "point-load-row__remove";
@@ -650,13 +672,15 @@ function renderPointLoads() {
 
     row.appendChild(posInput);
     row.appendChild(magInput);
+    row.appendChild(axisSelect);
     row.appendChild(removeBtn);
     pointLoadsListEl.appendChild(row);
   });
 }
 
 btnAddLoad.addEventListener("click", () => {
-  state.pointLoads.push({ position_fraction: 0.5, magnitude: -1000 });
+  const sharedAxis = state.pointLoads.length > 0 ? state.pointLoads[0].axis : "y";
+  state.pointLoads.push({ position_fraction: 0.5, magnitude: -1000, axis: sharedAxis });
   renderPointLoads();
 });
 
@@ -738,6 +762,11 @@ function summaryTile(grid, label, value, unit, opts = {}) {
 
 function renderBeamResults(r) {
   beamSummaryGrid.innerHTML = "";
+  summaryTile(
+    beamSummaryGrid,
+    "Load Axis",
+    r.load_axis === "x" ? "X (bends about Iyy)" : "Y (bends about Ixx)"
+  );
   summaryTile(beamSummaryGrid, "Max Moment", `${fmtNum(r.max_moment)} N·mm`, "", {
     sub: `@ ${fmtNum(r.max_moment_position)}mm`,
   });

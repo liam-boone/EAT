@@ -347,7 +347,12 @@ def delete_material_endpoint(name: str) -> None:
 
 class PointLoadModel(BaseModel):
     position_fraction: float = Field(..., ge=0.0, le=1.0)
-    magnitude: float = Field(..., description="N, +y direction (see UNITS.md)")
+    magnitude: float = Field(..., description="N, positive in the +axis direction (see UNITS.md)")
+    axis: Literal["x", "y"] = Field(
+        "y",
+        description="Section axis the load acts along: 'y' (default) bends about Ixx, "
+        "'x' bends about Iyy. All point loads in one request must share the same axis.",
+    )
 
 
 class SectionInput(BaseModel):
@@ -366,7 +371,9 @@ class BeamRequest(BaseModel):
         "fixed_fixed", "fixed_free", "simply_supported", "fixed_pinned"
     ]
     point_loads: list[PointLoadModel] = Field(..., min_length=1)
-    axial_load: float | None = Field(None, description="N, optional, for buckling safety factor")
+    axial_load: float | None = Field(
+        None, description="N, along the section's Z (long) axis; optional, for buckling safety factor"
+    )
 
     @model_validator(mode="after")
     def _check_section_source(self) -> "BeamRequest":
@@ -387,6 +394,7 @@ class BeamResponse(BaseModel):
     length: float
     material: str
     reactions: list[ReactionResponse]
+    load_axis: str = Field(description="'x' or 'y' -- which section axis the point loads bent about")
     max_moment: float
     max_moment_position: float
     max_bending_stress: float
@@ -434,7 +442,7 @@ def post_beam(req: BeamRequest) -> BeamResponse:
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 
-    point_loads = [PointLoad(pl.position_fraction, pl.magnitude) for pl in req.point_loads]
+    point_loads = [PointLoad(pl.position_fraction, pl.magnitude, axis=pl.axis) for pl in req.point_loads]
 
     try:
         result = analyze_beam(

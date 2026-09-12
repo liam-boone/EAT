@@ -95,6 +95,10 @@ engineering-formula tool built on real section geometry.
   grounded in actual extrusion design best practices (e.g. wall thickness
   uniformity, rib placement, avoiding sharp internal corners) rather than
   generic advice
+- **Solid-fill comparison**: alongside the real (hollow) profile's results,
+  show what the section properties would be if the outer outline were
+  fully filled (holes ignored) — a quick reference for how much the
+  material removal is actually buying you in weight vs. stiffness
 
 ## Release checklist (do at actual v1 release, not before)
 - Update `README.md` to remove/rewrite the "v1 scope boundaries" framing —
