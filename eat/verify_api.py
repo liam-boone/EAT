@@ -144,35 +144,43 @@ def check_section_from_dxf() -> list[Check]:
     checks.append(
         Check(
             "POST /section/from-dxf: garbage content -> 400 with clean message",
-            resp.status_code == 400 and "not a valid DXF file" in resp.json()["detail"],
+            resp.status_code == 400 and "could not be recovered as DXF" in resp.json()["detail"],
             resp.text,
         )
     )
 
-    # Failure: valid DXF, but two entities (out of v1 scope).
+    # Two disjoint closed loops in one file: valid multi-loop input (build
+    # step 7) -- the larger loop is used as the outer profile, and both
+    # are reported in dxf_loops rather than the old "exactly one entity"
+    # rejection.
     doc = ezdxf.new(dxfversion="R2010")
     doc.units = ezdxf_units.MM
     msp = doc.modelspace()
-    p1 = msp.add_lwpolyline([(0, 0), (10, 0), (10, 10), (0, 10)])
-    p1.closed = True
-    p2 = msp.add_lwpolyline([(20, 0), (30, 0), (30, 10), (20, 10)])
-    p2.closed = True
+    small = msp.add_lwpolyline([(0, 0), (10, 0), (10, 10), (0, 10)])
+    small.closed = True
+    big = msp.add_lwpolyline([(20, 0), (50, 0), (50, 30), (20, 30)])
+    big.closed = True
     buf = io.StringIO()
     doc.write(buf)
     dxf_bytes = buf.getvalue().encode("utf-8")
 
     resp = client.post(
         "/section/from-dxf",
-        files={"file": ("two_entities.dxf", io.BytesIO(dxf_bytes), "application/dxf")},
+        files={"file": ("two_loops.dxf", io.BytesIO(dxf_bytes), "application/dxf")},
         data={"material_name": "6061-T6 Aluminum (Extruded)"},
     )
-    checks.append(
-        Check(
-            "POST /section/from-dxf: 2 entities -> 400 naming the count",
-            resp.status_code == 400 and "found 2 entities" in resp.json()["detail"],
-            resp.text,
+    checks.append(Check("POST /section/from-dxf: two disjoint loops -> 200 (multi-loop)", resp.status_code == 200, resp.text))
+    if resp.status_code == 200:
+        body = resp.json()
+        checks.append(
+            Check(
+                "POST /section/from-dxf: both loops reported, larger used as outer",
+                body["dxf_loops"] is not None
+                and len(body["dxf_loops"]) == 2
+                and _rel_close(body["area"], 900.0, 1e-2),
+                f"dxf_loops={body.get('dxf_loops')}, area={body.get('area')}",
+            )
         )
-    )
 
     return checks
 

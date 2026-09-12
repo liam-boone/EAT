@@ -31,7 +31,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 
 from eat.beam import BeamResult, BoundaryCondition, PointLoad, analyze_beam
-from eat.dxf_io import DxfImportError, export_polygon_to_text, import_polygon_from_text
+from eat.dxf_io import DxfImportError, export_polygon_to_text, import_polygon_from_bytes
 from eat.materials import (
     add_material,
     delete_material,
@@ -140,9 +140,28 @@ class SectionRequest(BaseModel):
     mesh_size: float | None = None
 
 
+class DxfLoopInfo(BaseModel):
+    vertex_count: int
+    area: float = Field(description="mm^2")
+    bbox: tuple[float, float, float, float] = Field(description="(minx, miny, maxx, maxy), mm")
+
+
 class SectionResponse(BaseModel):
     section_id: str = Field(description="Pass this as section_id in a later POST /beam call")
     vertices: list[Vertex] = Field(description="Echoed back so the frontend can redraw the profile (e.g. after a DXF import)")
+    dxf_warnings: list[str] = Field(
+        default_factory=list,
+        description="Repairs ezdxf.recover made while loading a DXF file (empty for non-DXF input, or a clean file)",
+    )
+    dxf_loops: list[DxfLoopInfo] | None = Field(
+        None,
+        description="Every closed loop found in an imported DXF, outer and interior alike "
+        "(null for non-DXF input). The largest becomes `vertices`; interior loops "
+        "(holes) are reported but not yet subtracted -- see dxf_outer_loop_index.",
+    )
+    dxf_outer_loop_index: int | None = Field(
+        None, description="Index into dxf_loops that became `vertices` (null for non-DXF input)"
+    )
     material: str
     area: float
     perimeter: float
@@ -168,9 +187,22 @@ class SectionResponse(BaseModel):
 
     @classmethod
     def from_result(
-        cls, section_id: str, vertices: list[Vertex], result: SectionResult
+        cls,
+        section_id: str,
+        vertices: list[Vertex],
+        result: SectionResult,
+        dxf_warnings: list[str] | None = None,
+        dxf_loops: list[DxfLoopInfo] | None = None,
+        dxf_outer_loop_index: int | None = None,
     ) -> "SectionResponse":
-        return cls(section_id=section_id, vertices=vertices, **asdict(result))
+        return cls(
+            section_id=section_id,
+            vertices=vertices,
+            dxf_warnings=dxf_warnings or [],
+            dxf_loops=dxf_loops,
+            dxf_outer_loop_index=dxf_outer_loop_index,
+            **asdict(result),
+        )
 
 
 def _store_section(result: SectionResult) -> str:
@@ -180,13 +212,20 @@ def _store_section(result: SectionResult) -> str:
 
 
 def _run_section_analysis(
-    vertices: list[Vertex], material: Material, mesh_size: float | None
+    vertices: list[Vertex],
+    material: Material,
+    mesh_size: float | None,
+    dxf_warnings: list[str] | None = None,
+    dxf_loops: list[DxfLoopInfo] | None = None,
+    dxf_outer_loop_index: int | None = None,
 ) -> SectionResponse:
     try:
         result = analyze_section(vertices, material, mesh_size=mesh_size)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    return SectionResponse.from_result(_store_section(result), vertices, result)
+    return SectionResponse.from_result(
+        _store_section(result), vertices, result, dxf_warnings, dxf_loops, dxf_outer_loop_index
+    )
 
 
 @app.post("/section", response_model=SectionResponse)
@@ -209,16 +248,21 @@ async def post_section_from_dxf(
 
     raw = await file.read()
     try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise HTTPException(400, f"Could not decode '{file.filename}' as text: {exc}") from exc
-
-    try:
-        vertices = import_polygon_from_text(text, source_label=file.filename or "<uploaded file>")
+        dxf_result = import_polygon_from_bytes(raw, source_label=file.filename or "<uploaded file>")
     except DxfImportError as exc:
         raise HTTPException(400, str(exc)) from exc
 
-    return _run_section_analysis(vertices, material, mesh_size)
+    dxf_loops = [
+        DxfLoopInfo(vertex_count=l.vertex_count, area=l.area, bbox=l.bbox) for l in dxf_result.loops
+    ]
+    return _run_section_analysis(
+        dxf_result.vertices,
+        material,
+        mesh_size,
+        dxf_warnings=dxf_result.warnings,
+        dxf_loops=dxf_loops,
+        dxf_outer_loop_index=dxf_result.outer_loop_index,
+    )
 
 
 class ExportDxfRequest(BaseModel):
