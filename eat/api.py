@@ -1,7 +1,7 @@
 """
 EAT FastAPI layer — wires together the section engine (step 1), material
-list (step 2), beam engine (step 3), DXF I/O (step 4), and run history
-(step 9) as an HTTP API.
+list (step 2), beam engine (step 3), DXF I/O (step 4), run history
+(step 9), and baseline comparison (step 10) as an HTTP API.
 
 No frontend yet: this is the API layer only, meant to be exercised via
 the auto-generated docs at /docs (Swagger UI) or curl/httpie. See
@@ -26,6 +26,14 @@ Every successful POST /section, /section/from-dxf, and /beam call also
 appends a full snapshot (profile, material, inputs, and the
 already-computed result) to eat.history's JSON-backed log -- see that
 module's docstring for why a JSON file over SQLite here.
+
+GET/POST /baseline and POST /baseline/beam wrap eat.baseline, letting the
+frontend compare a section/beam analysis against a reference "baseline"
+(a built-in extrusion profile, or any history entry set as one) -- see
+that module's docstring. Neither of these routes logs to history: they're
+derived/hypothetical lookups (a percentage comparison, or "what would the
+baseline do under these same beam loads"), not analysis runs in their own
+right.
 """
 
 from __future__ import annotations
@@ -39,7 +47,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 
-from eat import history
+from eat import baseline, history
 from eat.beam import BeamResult, BoundaryCondition, PointLoad, analyze_beam
 from eat.dxf_io import DxfImportError, export_polygon_to_text, import_polygon_from_bytes
 from eat.materials import (
@@ -560,6 +568,115 @@ def delete_history_entry(entry_id: str) -> None:
         history.delete_entry(entry_id)
     except KeyError as exc:
         raise HTTPException(404, _error_message(exc)) from exc
+
+
+# --- Baseline comparison endpoints -------------------------------------------
+
+
+class BaselineResponse(BaseModel):
+    source: Literal["builtin", "history"]
+    name: str
+    material: str
+    area: float
+    ixx: float
+    iyy: float
+    ea: float
+    ei_xx: float
+    ei_yy: float
+    mass_per_length: float | None
+    history_entry_id: str | None = Field(
+        None, description="Set when source='history': the backing entry's id"
+    )
+
+
+def _baseline_response(info: baseline.BaselineInfo) -> BaselineResponse:
+    sr = info.section_result
+    return BaselineResponse(
+        source=info.source,
+        name=info.name,
+        material=info.material,
+        area=sr["area"],
+        ixx=sr["ixx"],
+        iyy=sr["iyy"],
+        ea=sr["ea"],
+        ei_xx=sr["ei_xx"],
+        ei_yy=sr["ei_yy"],
+        mass_per_length=sr["mass_per_length"],
+        history_entry_id=info.history_entry_id,
+    )
+
+
+class BaselineSelectionRequest(BaseModel):
+    type: Literal["builtin", "history"]
+    entry_id: str | None = Field(None, description="Required when type='history'")
+
+    @model_validator(mode="after")
+    def _check_entry_id(self) -> "BaselineSelectionRequest":
+        if self.type == "history" and not self.entry_id:
+            raise ValueError("entry_id is required when type='history'")
+        return self
+
+
+@app.get("/baseline", response_model=BaselineResponse)
+def get_baseline() -> BaselineResponse:
+    """The currently-selected baseline's section-level properties, for the
+    frontend's always-available EIxx/EIyy/mass-per-length comparison rows
+    (the percentage arithmetic itself is trivial client-side math against
+    whatever section is currently displayed)."""
+    return _baseline_response(baseline.resolve_baseline())
+
+
+@app.post("/baseline", response_model=BaselineResponse)
+def post_baseline(req: BaselineSelectionRequest) -> BaselineResponse:
+    """Change which baseline is active. Persists until changed again --
+    see eat.baseline's docstring for the JSON-file storage rationale."""
+    if req.type == "history":
+        assert req.entry_id is not None
+        try:
+            history.get_entry(req.entry_id)
+        except KeyError as exc:
+            raise HTTPException(404, _error_message(exc)) from exc
+        baseline.set_baseline_setting({"type": "history", "entry_id": req.entry_id})
+    else:
+        baseline.set_baseline_setting({"type": "builtin"})
+    return _baseline_response(baseline.resolve_baseline())
+
+
+class BaselineBeamRequest(BaseModel):
+    """Same shape as BeamRequest's beam-only fields -- the frontend sends
+    whatever length/BC/loads it just ran against the *current* profile,
+    and this replays them against the baseline's profile instead, so the
+    two deflection/safety-factor figures are under identical conditions."""
+
+    length: float = Field(..., gt=0, description="mm")
+    boundary_condition: Literal["fixed_fixed", "fixed_free", "simply_supported", "fixed_pinned"]
+    point_loads: list[PointLoadModel] = Field(..., min_length=1)
+    axial_load: float | None = None
+
+
+@app.post("/baseline/beam", response_model=BeamResponse)
+def post_baseline_beam(req: BaselineBeamRequest) -> BeamResponse:
+    info = baseline.resolve_baseline()
+    try:
+        material = get_material(info.material)
+    except KeyError as exc:
+        raise HTTPException(
+            404, f"Baseline material '{info.material}' no longer exists: {_error_message(exc)}"
+        ) from exc
+    section = SectionResult(**info.section_result)
+    point_loads = [PointLoad(pl.position_fraction, pl.magnitude, axis=pl.axis) for pl in req.point_loads]
+    try:
+        result = analyze_beam(
+            section,
+            material,
+            length=req.length,
+            boundary_condition=BoundaryCondition(req.boundary_condition),
+            point_loads=point_loads,
+            axial_load=req.axial_load,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return BeamResponse.from_result(result)
 
 
 # Frontend static files (build step 6). Mounted last and at "/" so it acts

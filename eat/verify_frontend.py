@@ -30,6 +30,22 @@ renders what comes back, for three flows:
    the UI wiring. Every history entry any flow here creates (all four) is
    swept up at the end, restoring eat/history.json -- the real file a
    user's actual runs live in -- to its pre-test state.
+5. Import eat/fixtures/rectangle_50x100.dxf (exact vertices, unlike flow
+   1's mouse clicks -- needed for a tight percentage match) with 6061-T6
+   -> confirm the "Compared to Baseline" section's EIxx/EIyy/Mass-per-
+   length percentages against the default built-in KJN baseline match
+   hand-computed ratios (both sides' numbers independently known: the
+   rectangle's from the textbook Ixx/Iyy formula, the KJN baseline's from
+   eat/verify_baseline.py's own established figures) -> set that same
+   rectangle entry as the baseline from the History panel -> confirm the
+   percentages drop to ~0% (comparing it against itself) -> kill and
+   relaunch the server process (a real "simulated restart") -> confirm
+   GET /baseline still reports that entry, and that a fresh analysis
+   against the restarted server still compares correctly. eat.baseline's
+   own setting-persistence/resolution logic is unit-tested in isolation
+   in eat/verify_baseline.py; this only checks the UI wiring end-to-end.
+   The baseline selection is restored to its pre-test state afterward,
+   same as the history sweep above.
 
 Also checks two smaller additions to the sketch canvas / results panel:
 
@@ -99,6 +115,29 @@ def wait_for_server(timeout=20):
     return False
 
 
+def start_server():
+    return subprocess.Popen(
+        [str(PROJECT_ROOT / ".venv" / "bin" / "uvicorn"), "eat.api:app", "--host", "127.0.0.1", "--port", str(PORT)],
+        cwd=PROJECT_ROOT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def restart_server(old_server):
+    """A real process kill + fresh launch -- not just re-reading a file --
+    for a genuine "simulated restart" of the baseline-persistence check."""
+    old_server.terminate()
+    try:
+        old_server.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        old_server.kill()
+    new_server = start_server()
+    if not wait_for_server():
+        raise RuntimeError("Server did not come back up after simulated restart")
+    return new_server
+
+
 def canvas_point(bbox, css_width, wx, wy):
     """Mirror app.js's worldToScreen(), returning absolute page coordinates."""
     css_height = round(css_width * 0.75)
@@ -119,6 +158,14 @@ def _get_json(url):
         return json.loads(resp.read())
 
 
+def _post_json(url, payload):
+    req = urllib.request.Request(
+        url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}, method="POST"
+    )
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        return json.loads(resp.read())
+
+
 def _delete(url):
     urllib.request.urlopen(urllib.request.Request(url, method="DELETE"), timeout=5)
 
@@ -129,13 +176,9 @@ def main() -> int:
     console_errors: list[str] = []
     captured: dict[str, dict] = {}
 
-    server = subprocess.Popen(
-        [str(PROJECT_ROOT / ".venv" / "bin" / "uvicorn"), "eat.api:app", "--host", "127.0.0.1", "--port", str(PORT)],
-        cwd=PROJECT_ROOT,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    server = start_server()
     history_baseline_ids: set[str] = set()
+    baseline_setting_before: dict | None = None
     try:
         if not wait_for_server():
             checks.append(Check("Server started", False, "timed out waiting for port"))
@@ -147,7 +190,10 @@ def main() -> int:
         # file an actual user's runs live in) as a side effect -- snapshot
         # what's there before touching it so it can all be swept up at the
         # end, same restore-to-original-state discipline as verify_api.py.
+        # Same for the baseline *selection* itself (eat/baseline.json),
+        # which the History flow's "set as baseline" actions change.
         history_baseline_ids = {e["id"] for e in _get_json(BASE_URL + "/history")}
+        baseline_setting_before = _get_json(BASE_URL + "/baseline")
 
         with sync_playwright() as p:
             browser = p.chromium.launch()
@@ -165,7 +211,21 @@ def main() -> int:
                         history_entry_captures.append(resp.json())
                     except Exception:
                         pass
-                for key in ("/section/from-dxf", "/section/to-dxf", "/section", "/beam", "/materials", "/history"):
+                # Longer/more-specific suffixes first: "/baseline/beam" and
+                # "/section/from-dxf" etc. would otherwise also match the
+                # shorter "/beam"/"/section" checks below (endswith), which
+                # previously let the frontend's fire-and-forget baseline
+                # comparison silently clobber the real /beam capture.
+                for key in (
+                    "/section/from-dxf",
+                    "/section/to-dxf",
+                    "/baseline/beam",
+                    "/baseline",
+                    "/section",
+                    "/beam",
+                    "/materials",
+                    "/history",
+                ):
                     if resp.url.endswith(key):
                         try:
                             captured[key] = resp.json()
@@ -557,7 +617,18 @@ def main() -> int:
             checks.append(
                 Check(
                     "History: loading an entry issues no new POST /section or /beam (frozen, not recomputed)",
-                    all(not (u.endswith("/section") or u.endswith("/beam")) for u in new_posts),
+                    # Excludes /baseline and /baseline/beam: loadHistoryEntry
+                    # also (deliberately) triggers a fresh baseline-comparison
+                    # lookup, which is never part of the "frozen, not
+                    # recomputed" guarantee this check is about -- see
+                    # refreshBaselineComparison's own docstring in app.js.
+                    all(
+                        not (
+                            (u.endswith("/section") and "/baseline" not in u)
+                            or (u.endswith("/beam") and "/baseline" not in u)
+                        )
+                        for u in new_posts
+                    ),
                     f"new POSTs={new_posts}",
                 )
             )
@@ -575,7 +646,8 @@ def main() -> int:
                         "/beam response exactly (frozen, not recomputed differently)",
                         loaded_beam.get("max_moment") == beam_resp["max_moment"]
                         and loaded_beam.get("max_deflection") == beam_resp["max_deflection"],
-                        f"loaded={loaded_beam.get('max_moment')}, original={beam_resp['max_moment']}",
+                        f"loaded=(moment={loaded_beam.get('max_moment')}, defl={loaded_beam.get('max_deflection')}), "
+                        f"original=(moment={beam_resp['max_moment']}, defl={beam_resp['max_deflection']})",
                     )
                 )
 
@@ -611,6 +683,121 @@ def main() -> int:
             )
             page.click("#btn-close-history")
 
+            # --- Flow 5: baseline comparison ---
+            # Import the exact rectangle_50x100.dxf fixture (not mouse
+            # clicks -- flow 1's own comment notes those aren't precise
+            # enough for a tight percentage match) with 6061-T6 (already
+            # selected, unchanged since flow 1): a hand-checkable case
+            # against the built-in KJN baseline, geometry and material both
+            # fully known on both sides.
+            page.click("#btn-clear")
+            captured.pop("/section/from-dxf", None)
+            page.set_input_files("#dxf-file-input", str(PROJECT_ROOT / "eat" / "fixtures" / "rectangle_50x100.dxf"))
+            page.wait_for_selector("#section-results:not([hidden])", timeout=5000)
+            page.wait_for_selector("#baseline-section:not([hidden])", timeout=5000)
+
+            baseline_name_builtin = page.locator("#baseline-name").inner_text()
+            checks.append(
+                Check(
+                    "Baseline: indicator shows the built-in profile by default",
+                    "KJN" in baseline_name_builtin,
+                    baseline_name_builtin,
+                )
+            )
+
+            def read_baseline_pcts():
+                labels = page.locator("#baseline-comparison-grid dt").all_inner_texts()
+                values = page.locator("#baseline-comparison-grid dd").all_inner_texts()
+                return dict(zip(labels, (float(v.replace("%", "").replace(",", "")) for v in values)))
+
+            pcts_vs_builtin = read_baseline_pcts()
+            # E=69000 MPa (6061-T6) * Ixx=4,166,666.667 / Iyy=1,041,666.667
+            # (textbook, 50x100mm) vs the built-in KJN baseline's own
+            # already-cross-checked EIxx=826,448,688.97, EIyy=3,187,731,329.51
+            # (eat/verify_baseline.py); mass = 2700 * 0.005 = 13.5 kg/m vs
+            # the baseline's 0.7766685396 kg/m.
+            expected_pcts = {"EIxx": 34687.398641379827, "EIyy": 2154.738325484663, "Mass Per Length": 1638.1932331828054}
+            pct_matches = all(
+                label in pcts_vs_builtin and _rel_close(pcts_vs_builtin[label], expected, 5e-3)
+                for label, expected in expected_pcts.items()
+            )
+            checks.append(
+                Check(
+                    "Baseline: rectangle-vs-KJN-baseline percentages match the hand-computed ratios",
+                    pct_matches,
+                    f"{pcts_vs_builtin} vs expected {expected_pcts}",
+                )
+            )
+
+            # --- Set this same rectangle entry as the baseline ---
+            page.click("#btn-open-history")
+            page.wait_for_selector("#history-modal:not([hidden])", timeout=5000)
+            page.wait_for_selector("#history-list .history-row", timeout=5000)
+            first_row = page.locator("#history-list .history-row").first
+            first_row.locator(".history-row__actions button").first.click()  # "Set as Baseline"
+            page.wait_for_function(
+                "document.querySelector('#history-list .history-row .history-row__tag--baseline') !== null",
+                timeout=3000,
+            )
+            checks.append(Check("Baseline: 'Set as Baseline' tags the row in the History list", True))
+            page.click("#btn-close-history")
+
+            page.wait_for_function(
+                "document.getElementById('baseline-name').textContent.indexOf('KJN') === -1",
+                timeout=3000,
+            )
+            pcts_vs_self = read_baseline_pcts()
+            checks.append(
+                Check(
+                    "Baseline: comparing the rectangle against itself (now the baseline) reads ~0%",
+                    all(abs(pcts_vs_self.get(label, 999)) < 0.5 for label in expected_pcts),
+                    f"{pcts_vs_self}",
+                )
+            )
+
+            baseline_after_set = _get_json(BASE_URL + "/baseline")
+            checks.append(
+                Check(
+                    "Baseline: GET /baseline reflects the just-selected history entry",
+                    baseline_after_set["source"] == "history",
+                    f"{baseline_after_set}",
+                )
+            )
+
+            # --- Simulated restart: kill and relaunch the server process,
+            # then confirm the selection survived on disk, not just in the
+            # running process's memory. ---
+            server = restart_server(server)
+            baseline_after_restart = _get_json(BASE_URL + "/baseline")
+            checks.append(
+                Check(
+                    "Baseline: selection persists across a simulated restart (fresh process, same file)",
+                    baseline_after_restart["source"] == "history"
+                    and baseline_after_restart["history_entry_id"] == baseline_after_set["history_entry_id"],
+                    f"before={baseline_after_set}, after={baseline_after_restart}",
+                )
+            )
+
+            # And a fresh page load against the restarted server still
+            # produces the correct (self-comparison, ~0%) figures -- not
+            # just that the raw setting file survived, but that it's
+            # actually wired up correctly end-to-end afterward too.
+            page.reload()
+            page.wait_for_selector(
+                "#material-select option[value]:not([value=''])", state="attached", timeout=10000
+            )
+            page.select_option("#material-select", label="6061-T6 Aluminum (Extruded)")
+            page.set_input_files("#dxf-file-input", str(PROJECT_ROOT / "eat" / "fixtures" / "rectangle_50x100.dxf"))
+            page.wait_for_selector("#baseline-section:not([hidden])", timeout=5000)
+            pcts_after_restart = read_baseline_pcts()
+            checks.append(
+                Check(
+                    "Baseline: post-restart, a fresh analysis still compares correctly against the persisted baseline",
+                    all(abs(pcts_after_restart.get(label, 999)) < 0.5 for label in expected_pcts),
+                    f"{pcts_after_restart}",
+                )
+            )
+
             screenshot_path.parent.mkdir(parents=True, exist_ok=True)
             page.screenshot(path=str(screenshot_path), full_page=True)
             checks.append(Check(f"Screenshot saved to {screenshot_path}", screenshot_path.exists()))
@@ -636,6 +823,26 @@ def main() -> int:
                 f"baseline={len(history_baseline_ids)}, final={history_final_count}",
             )
         )
+
+        # The baseline flow below sets a history entry as the baseline
+        # (then restarts the server to prove it persists) -- restore
+        # whatever was selected before this script ran. The entry it
+        # referenced, if any, is untouched by the sweep above (it
+        # predates this run, so it's in history_baseline_ids).
+        if baseline_setting_before is not None:
+            if baseline_setting_before["source"] == "history":
+                _post_json(BASE_URL + "/baseline", {"type": "history", "entry_id": baseline_setting_before["history_entry_id"]})
+            else:
+                _post_json(BASE_URL + "/baseline", {"type": "builtin"})
+            baseline_final = _get_json(BASE_URL + "/baseline")
+            checks.append(
+                Check(
+                    "Baseline setting restored to its pre-test state",
+                    baseline_final["source"] == baseline_setting_before["source"]
+                    and baseline_final["history_entry_id"] == baseline_setting_before["history_entry_id"],
+                    f"before={baseline_setting_before}, after={baseline_final}",
+                )
+            )
     finally:
         server.terminate()
         try:

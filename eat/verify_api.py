@@ -23,6 +23,18 @@ in this file created, restoring eat/history.json -- the real file a
 user's actual runs live in -- to its pre-test state, the same discipline
 check_materials() already applies to materials.json.
 
+Also confirms the baseline-comparison endpoints (build step 10): GET
+/baseline defaults to the built-in profile, POST /baseline selects a
+history entry as the baseline (validating entry_id and rejecting an
+unknown one), POST /baseline/beam replays a beam analysis against
+whatever's currently selected, and deleting the referenced history entry
+falls back to the built-in baseline rather than erroring -- eat.baseline's
+own setting-persistence/resolution logic (plus the built-in profile's
+hand-checkable figures) is unit-tested in isolation in
+eat/verify_baseline.py; this file only checks the HTTP wiring. main()
+restores eat/baseline.json's setting to its pre-test state, same
+restore-to-original-state discipline as the other two shared JSON files.
+
 Run with: python -m eat.verify_api
 """
 
@@ -36,6 +48,7 @@ from ezdxf import units as ezdxf_units
 from fastapi.testclient import TestClient
 
 from eat.api import app
+from eat.baseline import DEFAULT_BASELINE_SETTING_PATH, get_baseline_setting, set_baseline_setting
 
 client = TestClient(app)
 
@@ -559,6 +572,104 @@ def check_history() -> list[Check]:
     return checks
 
 
+# --- /baseline -----------------------------------------------------------------
+
+
+def check_baseline() -> list[Check]:
+    checks: list[Check] = []
+    rectangle = [[0, 0], [50, 0], [50, 100], [0, 100]]
+
+    # --- Default: the built-in profile ---
+    resp = client.get("/baseline")
+    checks.append(Check("GET /baseline: 200 OK", resp.status_code == 200, resp.text))
+    body = resp.json()
+    checks.append(
+        Check(
+            "GET /baseline: defaults to the built-in KJN profile",
+            body["source"] == "builtin" and _rel_close(body["area"], 287.6550146754686, 1e-6),
+            f"{body}",
+        )
+    )
+
+    # --- Select a history entry as the baseline ---
+    # Uses a materials.json-registered material (not the usual inline
+    # "Test Steel"): POST /baseline/beam looks the baseline's material up
+    # by *name* from materials.json to run analyze_beam, so an inline spec
+    # (never persisted anywhere) wouldn't resolve.
+    resp = client.post(
+        "/section", json={"vertices": rectangle, "material_name": "6061-T6 Aluminum (Extruded)", "mesh_size": 1.0}
+    )
+    entry_id = client.get("/history").json()[0]["id"]
+
+    resp = client.post("/baseline", json={"type": "history", "entry_id": entry_id})
+    checks.append(Check("POST /baseline (select history entry): 200 OK", resp.status_code == 200, resp.text))
+    body = resp.json()
+    checks.append(
+        Check(
+            "POST /baseline: response reflects the newly-selected entry",
+            body["source"] == "history"
+            and body["history_entry_id"] == entry_id
+            and _rel_close(body["area"], 5000.0, 1e-6),
+            f"{body}",
+        )
+    )
+
+    resp = client.get("/baseline")
+    checks.append(
+        Check(
+            "GET /baseline: selection persists across a separate request",
+            resp.json()["history_entry_id"] == entry_id,
+            resp.text,
+        )
+    )
+
+    # --- POST /baseline/beam replays a beam analysis against it ---
+    resp = client.post(
+        "/baseline/beam",
+        json={
+            "length": 1000,
+            "boundary_condition": "simply_supported",
+            "point_loads": [{"position_fraction": 0.5, "magnitude": -1000}],
+        },
+    )
+    checks.append(Check("POST /baseline/beam: 200 OK", resp.status_code == 200, resp.text))
+    body = resp.json()
+    # |P|*L/4 (material-independent) and |P|*L^3/(48*E*Ixx) for 6061-T6's
+    # E=69000 MPa (not 6063-T6's 68900 -- easy to mix up) and this
+    # rectangle's textbook Ixx=4,166,666.667 mm^4.
+    expected_deflection = 1000.0 * 1000.0**3 / (48 * 69000.0 * 4166666.6666666665)
+    checks.append(
+        Check(
+            "POST /baseline/beam: matches the closed-form result for this rectangle+material",
+            _rel_close(abs(body["max_moment"]), 250000.0, 1e-6) and _rel_close(abs(body["max_deflection"]), expected_deflection, 1e-3),
+            f"max_moment={body.get('max_moment')}, max_deflection={body.get('max_deflection')}, expected_deflection={expected_deflection}",
+        )
+    )
+
+    # --- Validation failures ---
+    resp = client.post("/baseline", json={"type": "history"})
+    checks.append(Check("POST /baseline: type=history without entry_id -> 422", resp.status_code == 422, resp.text))
+
+    resp = client.post("/baseline", json={"type": "history", "entry_id": "does-not-exist"})
+    checks.append(Check("POST /baseline: unknown entry_id -> 404", resp.status_code == 404, resp.text))
+
+    # --- Deleting the referenced entry falls back to the built-in ---
+    client.delete(f"/history/{entry_id}")
+    resp = client.get("/baseline")
+    checks.append(
+        Check(
+            "GET /baseline: falls back to builtin once the referenced entry is deleted",
+            resp.json()["source"] == "builtin",
+            resp.text,
+        )
+    )
+
+    resp = client.post("/baseline", json={"type": "builtin"})
+    checks.append(Check("POST /baseline: reset to builtin -> 200 OK", resp.status_code == 200, resp.text))
+
+    return checks
+
+
 def main() -> int:
     # Snapshot history before anything runs: check_section/_from_dxf/_beam
     # all trigger their own history-logging as a side effect of exercising
@@ -569,6 +680,12 @@ def main() -> int:
     # as it was before this script ran, the same restore-to-original-state
     # discipline check_materials() already applies to materials.json.
     history_baseline_ids = {s["id"] for s in client.get("/history").json()}
+    # Same discipline for the baseline *setting* (which profile is
+    # selected) -- check_baseline() changes it via POST /baseline; restore
+    # whatever it was, bypassing the API (there's no GET for the raw
+    # setting, only the resolved info) since this is teardown, not part of
+    # what's under test.
+    baseline_setting_before = get_baseline_setting(DEFAULT_BASELINE_SETTING_PATH)
 
     section_checks, rectangle_section_id = check_section()
     all_checks = (
@@ -577,6 +694,7 @@ def main() -> int:
         + check_materials()
         + check_beam(rectangle_section_id)
         + check_history()
+        + check_baseline()
     )
 
     history_after = client.get("/history").json()
@@ -589,6 +707,15 @@ def main() -> int:
             "History file restored to its pre-test state",
             history_final_count == len(history_baseline_ids),
             f"baseline={len(history_baseline_ids)}, final={history_final_count}",
+        )
+    )
+
+    set_baseline_setting(baseline_setting_before, DEFAULT_BASELINE_SETTING_PATH)
+    all_checks.append(
+        Check(
+            "Baseline setting restored to its pre-test state",
+            get_baseline_setting(DEFAULT_BASELINE_SETTING_PATH) == baseline_setting_before,
+            f"{baseline_setting_before}",
         )
     )
 

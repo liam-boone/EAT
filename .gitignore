@@ -36,3 +36,7 @@ eat/verify_frontend_screenshot.png
 # Run history: user-generated local data (eat.history), not source or a
 # shipped seed list like materials.json -- shouldn't be committed.
 eat/history.json
+
+# Baseline selection: user-generated local setting (eat.baseline), not
+# source -- shouldn't be committed.
+eat/baseline.json

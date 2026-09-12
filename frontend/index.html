@@ -81,6 +81,16 @@
       </details>
     </div>
 
+    <div id="baseline-section" class="baseline-section" hidden>
+      <h3 class="panel__subtitle">Compared to Baseline</h3>
+      <div class="baseline-indicator">
+        <span class="baseline-indicator__label">Baseline:</span>
+        <span id="baseline-name" class="baseline-indicator__name">&mdash;</span>
+        <button type="button" class="btn btn--small btn--ghost" id="btn-use-builtin-baseline">Use Built-in</button>
+      </div>
+      <dl class="result-grid" id="baseline-comparison-grid"></dl>
+    </div>
+
     <div id="beam-inputs" class="beam-inputs" hidden>
       <h3 class="panel__subtitle">Length &amp; Loads <span class="optional-tag">optional</span></h3>
 
@@ -108,7 +118,7 @@
 
       <div class="field">
         <label for="input-axial" class="field__label">Axial Load (N) &mdash; Z, along length <span class="optional-tag">optional, for buckling safety factor</span></label>
-        <input type="number" id="input-axial" class="input" step="any" placeholder="e.g. 5000" />
+        <input type="number" id="input-axial" class="input" step="50" placeholder="e.g. 5000" />
       </div>
 
       <button type="button" class="btn btn--accent btn--block" id="btn-analyze-beam">&#9654; Analyze Beam</button>

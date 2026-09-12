@@ -20,6 +20,8 @@ const state = {
   viewOriginX: 0,        // world x mapped to the left margin
   viewOriginY: 0,        // world y mapped to the bottom margin
   pixelsPerMm: 1,        // recomputed on layout/resize
+  lastSectionResult: null, // currently-displayed section result, for the baseline comparison
+  lastBeamResult: null,    // currently-displayed beam result, for the baseline comparison
 };
 
 /* ------------------------------------------------------------------
@@ -69,6 +71,11 @@ const btnCloseHistory = document.getElementById("btn-close-history");
 const historyModal = document.getElementById("history-modal");
 const historyListEl = document.getElementById("history-list");
 const historyEmptyHint = document.getElementById("history-empty-hint");
+
+const baselineSectionEl = document.getElementById("baseline-section");
+const baselineNameEl = document.getElementById("baseline-name");
+const btnUseBuiltinBaseline = document.getElementById("btn-use-builtin-baseline");
+const baselineComparisonGrid = document.getElementById("baseline-comparison-grid");
 
 /* ------------------------------------------------------------------
    API helper — surfaces the API's own error text, never swallows it
@@ -533,9 +540,12 @@ materialSelect.addEventListener("change", () => {
 
 function invalidateSection() {
   state.sectionId = null;
+  state.lastSectionResult = null;
+  state.lastBeamResult = null;
   sectionResultsEl.hidden = true;
   beamInputsEl.hidden = true;
   beamResultsEl.hidden = true;
+  baselineSectionEl.hidden = true;
 }
 
 async function computeSection() {
@@ -556,14 +566,17 @@ async function computeSection() {
     sectionResultsEl.hidden = false;
     beamInputsEl.hidden = false;
     beamResultsEl.hidden = true;
+    refreshBaselineComparison(body, null);
   } catch (err) {
     showError(`Section analysis failed: ${err.message}`);
     sectionResultsEl.hidden = true;
     beamInputsEl.hidden = true;
+    baselineSectionEl.hidden = true;
   }
 }
 
 function renderSectionResults(r) {
+  state.lastSectionResult = r;
   sectionResultGridPrimary.innerHTML = "";
   resultRow(sectionResultGridPrimary, "Area", fmtNum(r.area), "mm²");
   resultRow(sectionResultGridPrimary, "Centroid", `${fmtNum(r.cx)}, ${fmtNum(r.cy)}`, "mm");
@@ -678,6 +691,7 @@ dxfFileInput.addEventListener("change", async () => {
     sectionResultsEl.hidden = false;
     beamInputsEl.hidden = false;
     beamResultsEl.hidden = true;
+    refreshBaselineComparison(body, null);
   } catch (err) {
     showError(`DXF import failed: ${err.message}`);
   }
@@ -739,7 +753,7 @@ function renderPointLoads() {
     const magInput = document.createElement("input");
     magInput.type = "number";
     magInput.className = "input";
-    magInput.step = "any";
+    magInput.step = "50"; // spinner step only -- typing remains free-form
     magInput.placeholder = "magnitude (N)";
     magInput.value = load.magnitude;
     magInput.addEventListener("input", () => {
@@ -859,6 +873,7 @@ btnAnalyzeBeam.addEventListener("click", async () => {
     });
     renderBeamResults(body);
     beamResultsEl.hidden = false;
+    refreshBaselineComparison(state.lastSectionResult, body);
   } catch (err) {
     showError(`Beam analysis failed: ${err.message}`);
     beamResultsEl.hidden = true;
@@ -888,6 +903,7 @@ function summaryTile(grid, label, value, unit, opts = {}) {
 }
 
 function renderBeamResults(r) {
+  state.lastBeamResult = r;
   beamSummaryGrid.innerHTML = "";
   summaryTile(
     beamSummaryGrid,
@@ -1058,12 +1074,18 @@ async function openHistory() {
   historyListEl.innerHTML = "";
   historyEmptyHint.hidden = true;
   try {
-    const entries = await apiFetch("/history");
+    const [entries, currentBaseline] = await Promise.all([
+      apiFetch("/history"),
+      apiFetch("/baseline").catch(() => null), // best-effort: still show the list if this fails
+    ]);
+    const currentBaselineEntryId = currentBaseline ? currentBaseline.history_entry_id : null;
     if (entries.length === 0) {
       historyEmptyHint.hidden = false;
       return;
     }
-    entries.forEach((entry) => historyListEl.appendChild(renderHistoryRow(entry)));
+    entries.forEach((entry) =>
+      historyListEl.appendChild(renderHistoryRow(entry, entry.id === currentBaselineEntryId))
+    );
   } catch (err) {
     showError(`Could not load history: ${err.message}`);
   }
@@ -1073,7 +1095,7 @@ function closeHistory() {
   historyModal.hidden = true;
 }
 
-function renderHistoryRow(summary) {
+function renderHistoryRow(summary, isCurrentBaseline) {
   const li = document.createElement("li");
   li.className = "history-row";
 
@@ -1106,11 +1128,40 @@ function renderHistoryRow(summary) {
     tag.textContent = "beam";
     meta.appendChild(tag);
   }
+  if (isCurrentBaseline) {
+    const tag = document.createElement("span");
+    tag.className = "history-row__tag history-row__tag--baseline";
+    tag.textContent = "baseline";
+    meta.appendChild(tag);
+  }
 
   main.appendChild(timestamp);
   main.appendChild(material);
   main.appendChild(meta);
   main.addEventListener("click", () => loadHistorySelection(summary.id));
+
+  const actions = document.createElement("div");
+  actions.className = "history-row__actions";
+
+  const baselineBtn = document.createElement("button");
+  baselineBtn.type = "button";
+  baselineBtn.className = "btn btn--small btn--ghost";
+  baselineBtn.textContent = isCurrentBaseline ? "Baseline" : "Set as Baseline";
+  baselineBtn.disabled = isCurrentBaseline;
+  baselineBtn.addEventListener("click", async (ev) => {
+    ev.stopPropagation();
+    try {
+      await apiFetch("/baseline", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "history", entry_id: summary.id }),
+      });
+      await openHistory(); // re-render the list so the "baseline" tag moves
+      refreshBaselineComparison(state.lastSectionResult, state.lastBeamResult);
+    } catch (err) {
+      showError(`Could not set baseline: ${err.message}`);
+    }
+  });
 
   const deleteBtn = document.createElement("button");
   deleteBtn.type = "button";
@@ -1123,13 +1174,16 @@ function renderHistoryRow(summary) {
       await apiFetch(`/history/${summary.id}`, { method: "DELETE" });
       li.remove();
       if (historyListEl.children.length === 0) historyEmptyHint.hidden = false;
+      if (isCurrentBaseline) refreshBaselineComparison(state.lastSectionResult, state.lastBeamResult);
     } catch (err) {
       showError(`Could not delete history entry: ${err.message}`);
     }
   });
 
+  actions.appendChild(baselineBtn);
+  actions.appendChild(deleteBtn);
   li.appendChild(main);
-  li.appendChild(deleteBtn);
+  li.appendChild(actions);
   return li;
 }
 
@@ -1187,7 +1241,15 @@ function loadHistoryEntry(entry) {
     beamResultsEl.hidden = false;
   } else {
     beamResultsEl.hidden = true;
+    state.lastBeamResult = null;
   }
+
+  // Exactly one call, after section (and beam, if present) rendering has
+  // fully settled -- calling this from inside renderSectionResults too
+  // (like renderSolidFillComparison does) would race a second call from
+  // the beam branch above and could let a stale section-only comparison
+  // clobber the correct final one.
+  refreshBaselineComparison(state.lastSectionResult, state.lastBeamResult);
 }
 
 btnOpenHistory.addEventListener("click", openHistory);
@@ -1197,6 +1259,101 @@ historyModal.addEventListener("click", (ev) => {
 });
 document.addEventListener("keydown", (ev) => {
   if (ev.key === "Escape" && !historyModal.hidden) closeHistory();
+});
+
+/* ------------------------------------------------------------------
+   Baseline comparison
+------------------------------------------------------------------ */
+
+function currentBeamRequestPayload() {
+  return {
+    length: parseFloat(inputLength.value),
+    boundary_condition: inputBc.value,
+    point_loads: state.pointLoads.filter(
+      (l) => Number.isFinite(l.position_fraction) && Number.isFinite(l.magnitude)
+    ),
+    axial_load: inputAxial.value === "" ? null : parseFloat(inputAxial.value),
+  };
+}
+
+/** Percentage a calculator would give for (current vs baseline): positive
+ * means the current value is higher. Shown alone, per spec -- not next to
+ * the raw duplicated numbers (those already exist in the results panel
+ * above and, for holes, in the solid-fill comparison). */
+function pctVsBaseline(currentVal, baselineVal) {
+  const pct = baselineVal !== 0 ? ((currentVal - baselineVal) / baselineVal) * 100 : 0;
+  const sign = pct >= 0 ? "+" : "";
+  return `${sign}${fmtNum(pct, { digits: 1 })}%`;
+}
+
+/** Refreshes the "Compared to Baseline" section for whatever's currently
+ * displayed. Always a fresh, live lookup against the current baseline
+ * setting -- like the solid-fill comparison, this was never part of any
+ * *frozen* stored result, so recomputing it (including for a reloaded
+ * history entry) doesn't touch the primary numbers those flows are about
+ * reproducing exactly. Call this once, after section (and beam, if
+ * present) rendering has fully settled -- see loadHistoryEntry's comment
+ * for why splitting it across two calls would race.
+ */
+async function refreshBaselineComparison(sectionResult, beamResult) {
+  if (!sectionResult) {
+    baselineSectionEl.hidden = true;
+    return;
+  }
+  try {
+    const b = await apiFetch("/baseline");
+    baselineNameEl.textContent = b.name;
+
+    const rows = [
+      ["EIxx", sectionResult.ei_xx, b.ei_xx],
+      ["EIyy", sectionResult.ei_yy, b.ei_yy],
+    ];
+    if (sectionResult.mass_per_length !== null && b.mass_per_length !== null) {
+      rows.push(["Mass Per Length", sectionResult.mass_per_length, b.mass_per_length]);
+    }
+
+    if (beamResult) {
+      try {
+        const baselineBeam = await apiFetch("/baseline/beam", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(currentBeamRequestPayload()),
+        });
+        rows.push(["Max Deflection", Math.abs(beamResult.max_deflection), Math.abs(baselineBeam.max_deflection)]);
+        if (
+          Number.isFinite(beamResult.safety_factor) &&
+          Number.isFinite(baselineBeam.safety_factor)
+        ) {
+          rows.push(["Safety Factor", beamResult.safety_factor, baselineBeam.safety_factor]);
+        }
+      } catch (err) {
+        // Beam-vs-baseline comparison is best-effort (e.g. the baseline's
+        // material may have been deleted) -- the section-level rows above
+        // still stand on their own.
+      }
+    }
+
+    baselineComparisonGrid.innerHTML = "";
+    rows.forEach(([label, currentVal, baselineVal]) => {
+      resultRow(baselineComparisonGrid, label, pctVsBaseline(currentVal, baselineVal));
+    });
+    baselineSectionEl.hidden = false;
+  } catch (err) {
+    baselineSectionEl.hidden = true;
+  }
+}
+
+btnUseBuiltinBaseline.addEventListener("click", async () => {
+  try {
+    await apiFetch("/baseline", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "builtin" }),
+    });
+    refreshBaselineComparison(state.lastSectionResult, state.lastBeamResult);
+  } catch (err) {
+    showError(`Could not reset baseline: ${err.message}`);
+  }
 });
 
 /* ------------------------------------------------------------------
