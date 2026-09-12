@@ -21,6 +21,8 @@ const state = {
   viewOriginY: 0,        // world y mapped to the bottom margin
   pixelsPerMm: 1,        // recomputed on layout/resize
   lastSectionResult: null, // currently-displayed section result, for the baseline comparison
+  highlight: null,         // suggestion geometry currently drawn on the sketch, if any
+  pinnedSuggestion: null,  // index of a click-pinned suggestion, so it survives mouseout
 };
 
 /* ------------------------------------------------------------------
@@ -75,6 +77,11 @@ const baselineSectionEl = document.getElementById("baseline-section");
 const baselineNameEl = document.getElementById("baseline-name");
 const btnUseBuiltinBaseline = document.getElementById("btn-use-builtin-baseline");
 const baselineMetricsEl = document.getElementById("baseline-metrics");
+
+const suggestionsSectionEl = document.getElementById("suggestions-section");
+const suggestionListEl = document.getElementById("suggestion-list");
+const suggestionsCountEl = document.getElementById("suggestions-count");
+const suggestionsEmptyEl = document.getElementById("suggestions-empty");
 
 /* ------------------------------------------------------------------
    API helper — surfaces the API's own error text, never swallows it
@@ -247,6 +254,40 @@ function render() {
   drawGrid(w, h);
   drawAxisIndicator(w, h);
   drawPolygon();
+  drawSuggestionHighlight();
+}
+
+/** Draws whichever suggestion is currently hovered or pinned, on top of
+ * the profile so it reads against the accent-coloured outline. */
+function drawSuggestionHighlight() {
+  const highlight = state.highlight;
+  if (!highlight) return;
+
+  ctx.save();
+  ctx.strokeStyle = "#FFB84D"; // --warning
+  ctx.fillStyle = "rgba(255, 184, 77, 0.25)";
+  ctx.lineWidth = 2;
+
+  (highlight.polylines || []).forEach((line) => {
+    if (line.length < 2) return;
+    ctx.beginPath();
+    line.forEach(([x, y], i) => {
+      const p = worldToScreen(x, y);
+      if (i === 0) ctx.moveTo(p.x, p.y);
+      else ctx.lineTo(p.x, p.y);
+    });
+    ctx.stroke();
+  });
+
+  (highlight.points || []).forEach(([x, y]) => {
+    const p = worldToScreen(x, y);
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 7, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  });
+
+  ctx.restore();
 }
 
 /** Small fixed corner gizmo showing which screen direction is +X / +Y --
@@ -540,10 +581,13 @@ materialSelect.addEventListener("change", () => {
 function invalidateSection() {
   state.sectionId = null;
   state.lastSectionResult = null;
+  state.highlight = null;
+  state.pinnedSuggestion = null;
   sectionResultsEl.hidden = true;
   beamInputsEl.hidden = true;
   beamResultsEl.hidden = true;
   baselineSectionEl.hidden = true;
+  suggestionsSectionEl.hidden = true;
 }
 
 async function computeSection() {
@@ -603,6 +647,90 @@ function renderSectionResults(r) {
 
   renderSolidFillComparison(r);
   refreshBaselineComparison(r);
+  refreshSuggestions(r);
+}
+
+/** Fetches the DFM / stiffness suggestions for whatever profile is
+ * displayed. Like the solid-fill and baseline comparisons, this is always
+ * a fresh derived lookup rather than part of any stored result, so it
+ * runs for reloaded history entries too. */
+async function refreshSuggestions(r) {
+  state.highlight = null;
+  state.pinnedSuggestion = null;
+  suggestionListEl.innerHTML = "";
+  try {
+    const found = await apiFetch("/suggestions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ section: { vertices: r.vertices, holes: r.holes || [] } }),
+    });
+    suggestionsCountEl.textContent = found.length ? `${found.length}` : "none";
+    suggestionsEmptyEl.hidden = found.length > 0;
+    found.forEach((suggestion, index) => {
+      suggestionListEl.appendChild(renderSuggestion(suggestion, index));
+    });
+    suggestionsSectionEl.hidden = false;
+  } catch (err) {
+    suggestionsSectionEl.hidden = true;
+  }
+}
+
+function renderSuggestion(suggestion, index) {
+  const li = document.createElement("li");
+  li.className = "suggestion";
+  li.dataset.index = String(index);
+
+  const title = document.createElement("div");
+  title.className = "suggestion__title";
+  title.textContent = suggestion.title;
+
+  const detail = document.createElement("div");
+  detail.className = "suggestion__detail";
+  detail.textContent = suggestion.detail;
+
+  li.appendChild(title);
+  li.appendChild(detail);
+
+  if (suggestion.ring && suggestion.vertex_indices.length) {
+    const where = document.createElement("div");
+    where.className = "suggestion__where";
+    const shown = suggestion.vertex_indices.slice(0, 8).join(", ");
+    const more = suggestion.vertex_indices.length > 8 ? ", …" : "";
+    where.textContent = `${suggestion.ring} — vertex ${shown}${more}`;
+    li.appendChild(where);
+  }
+
+  const show = () => {
+    state.highlight = suggestion;
+    render();
+  };
+  const clear = () => {
+    if (state.pinnedSuggestion !== null) return;
+    state.highlight = null;
+    render();
+  };
+
+  li.addEventListener("mouseenter", () => {
+    if (state.pinnedSuggestion === null) show();
+  });
+  li.addEventListener("mouseleave", clear);
+  li.addEventListener("click", () => {
+    const alreadyPinned = state.pinnedSuggestion === index;
+    suggestionListEl
+      .querySelectorAll(".suggestion--pinned")
+      .forEach((el) => el.classList.remove("suggestion--pinned"));
+    if (alreadyPinned) {
+      state.pinnedSuggestion = null;
+      state.highlight = null;
+    } else {
+      state.pinnedSuggestion = index;
+      li.classList.add("suggestion--pinned");
+      state.highlight = suggestion;
+    }
+    render();
+  });
+
+  return li;
 }
 
 /** Shows what the same outer boundary's properties would be with its

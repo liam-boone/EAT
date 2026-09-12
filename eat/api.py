@@ -1,7 +1,8 @@
 """
 EAT FastAPI layer — wires together the section engine (step 1), material
 list (step 2), beam engine (step 3), DXF I/O (step 4), run history
-(step 9), and baseline comparison (step 10) as an HTTP API.
+(step 9), baseline comparison (step 10), and design suggestions (step 11)
+as an HTTP API.
 
 No frontend yet: this is the API layer only, meant to be exercised via
 the auto-generated docs at /docs (Swagger UI) or curl/httpie. See
@@ -46,7 +47,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 
-from eat import baseline, history
+from eat import baseline, history, suggestions
 from eat.beam import BeamResult, BoundaryCondition, PointLoad, analyze_beam
 from eat.dxf_io import DxfImportError, export_polygon_to_text, import_polygon_from_bytes
 from eat.materials import (
@@ -656,6 +657,62 @@ def post_baseline(req: BaselineSelectionRequest) -> BaselineResponse:
     else:
         baseline.set_baseline_setting({"type": "builtin"})
     return _baseline_response(baseline.resolve_baseline())
+
+
+# --- Design suggestions -------------------------------------------------------
+
+
+class SuggestionResponse(BaseModel):
+    kind: str = Field(description="thin_wall | sharp_corner | material_distribution | core_material")
+    title: str
+    detail: str
+    ring: str | None = Field(None, description="'outer' or 'hole N', when the finding sits on a ring")
+    vertex_indices: list[int] = Field(
+        default_factory=list, description="Indices into that ring, for traceability"
+    )
+    points: list[Vertex] = Field(
+        default_factory=list, description="mm markers for the frontend to highlight"
+    )
+    polylines: list[list[Vertex]] = Field(
+        default_factory=list, description="mm paths for the frontend to highlight"
+    )
+
+
+class SuggestionsRequest(BaseModel):
+    section: SectionInput | None = Field(None, description="Vertices/holes to analyze...")
+    section_id: str | None = Field(None, description="...or a section_id from a prior POST /section")
+
+    @model_validator(mode="after")
+    def _check_section_source(self) -> "SuggestionsRequest":
+        if (self.section is None) == (self.section_id is None):
+            raise ValueError("Provide exactly one of 'section' or 'section_id'.")
+        return self
+
+
+@app.post("/suggestions", response_model=list[SuggestionResponse])
+def post_suggestions(req: SuggestionsRequest) -> list[SuggestionResponse]:
+    """DFM / stiffness suggestions reasoned from the profile's geometry --
+    see eat.suggestions for what's checked and why each threshold is what
+    it is. Purely geometric: no material, no meshing, and nothing logged
+    to history, since asking for advice isn't an analysis run."""
+    if req.section_id is not None:
+        cached = _SECTION_CACHE.get(req.section_id)
+        if cached is None:
+            raise HTTPException(
+                404,
+                f"No cached section with id '{req.section_id}'. It may have expired "
+                "(server restarted) or never existed — POST /section first.",
+            )
+        vertices, holes = cached.vertices, cached.holes
+    else:
+        assert req.section is not None
+        vertices, holes = req.section.vertices, req.section.holes or []
+
+    try:
+        found = suggestions.generate_suggestions(vertices, holes)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return [SuggestionResponse(**item) for item in suggestions.as_dicts(found)]
 
 
 # Frontend static files (build step 6). Mounted last and at "/" so it acts

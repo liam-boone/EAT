@@ -36,6 +36,15 @@ this file only checks the HTTP wiring. main() restores eat/baseline.json's
 setting to its pre-test state, same restore-to-original-state discipline
 as the other two shared JSON files.
 
+Also confirms the design-suggestions endpoint (build step 11): POST
+/suggestions works from inline geometry or a section_id and agrees
+between the two, returns a geometry reference the frontend can highlight,
+logs nothing to history, and -- the part that actually matters -- leaves
+the real KJN extrusion alone while flagging the L-angle's unfilleted
+inner corner. Whether each suggestion is sound engineering is judged in
+eat/verify_suggestions.py against five profiles with known right answers;
+this file only checks the HTTP wiring.
+
 Run with: python -m eat.verify_api
 """
 
@@ -654,6 +663,95 @@ def check_baseline() -> list[Check]:
     return checks
 
 
+# --- /suggestions ---------------------------------------------------------------
+
+
+def check_suggestions() -> list[Check]:
+    checks: list[Check] = []
+    l_angle = [[0, 0], [50, 0], [50, 10], [10, 10], [10, 60], [0, 60]]
+
+    history_before = len(client.get("/history").json())
+
+    resp = client.post("/suggestions", json={"section": {"vertices": l_angle}})
+    checks.append(Check("POST /suggestions (inline section): 200 OK", resp.status_code == 200, resp.text))
+    body = resp.json()
+    checks.append(
+        Check(
+            "POST /suggestions: L-angle returns just its unfilleted inner corner",
+            len(body) == 1 and body[0]["kind"] == "sharp_corner" and body[0]["points"] == [[10.0, 10.0]],
+            f"{[(s['kind'], s['points']) for s in body]}",
+        )
+    )
+    checks.append(
+        Check(
+            "POST /suggestions: findings carry title, detail and a geometry reference",
+            bool(body[0]["title"]) and bool(body[0]["detail"]) and body[0]["ring"] == "outer"
+            and body[0]["vertex_indices"] == [3],
+            f"{body[0]}",
+        )
+    )
+    checks.append(
+        Check(
+            "POST /suggestions creates no history entry (it's advice, not an analysis run)",
+            len(client.get("/history").json()) == history_before,
+            f"before={history_before}, after={len(client.get('/history').json())}",
+        )
+    )
+
+    # Same profile by section_id rather than re-sending its geometry.
+    section = client.post(
+        "/section",
+        json={"vertices": l_angle, "material_name": "6061-T6 Aluminum (Extruded)", "mesh_size": 1.0},
+    )
+    section_id = section.json()["section_id"]
+    resp = client.post("/suggestions", json={"section_id": section_id})
+    checks.append(Check("POST /suggestions (section_id): 200 OK", resp.status_code == 200, resp.text))
+    checks.append(
+        Check(
+            "POST /suggestions: section_id path gives the same answer as inline geometry",
+            resp.json() == body,
+            f"{resp.text}",
+        )
+    )
+
+    # A commercial profile should come back quiet -- the engine's whole value
+    # depends on not crying wolf (see eat/verify_suggestions.py).
+    with open("eat/fixtures/20X40_KJN992891.dxf", "rb") as f:
+        dxf = client.post(
+            "/section/from-dxf",
+            files={"file": ("kjn.dxf", f, "application/dxf")},
+            data={"material_name": "6063-T6 Aluminum (Extruded)"},
+        )
+    resp = client.post("/suggestions", json={"section_id": dxf.json()["section_id"]})
+    checks.append(
+        Check(
+            "POST /suggestions: the real KJN extrusion comes back with nothing to flag",
+            resp.status_code == 200 and resp.json() == [],
+            resp.text,
+        )
+    )
+
+    resp = client.post("/suggestions", json={"section": {"vertices": l_angle}, "section_id": section_id})
+    checks.append(Check("POST /suggestions: section + section_id both given -> 422", resp.status_code == 422, resp.text))
+
+    resp = client.post("/suggestions", json={})
+    checks.append(Check("POST /suggestions: neither section nor section_id -> 422", resp.status_code == 422, resp.text))
+
+    resp = client.post("/suggestions", json={"section_id": "does-not-exist"})
+    checks.append(
+        Check(
+            "POST /suggestions: unknown section_id -> 404 with clean message",
+            resp.status_code == 404 and "does-not-exist" in resp.json()["detail"],
+            resp.text,
+        )
+    )
+
+    resp = client.post("/suggestions", json={"section": {"vertices": [[0, 0], [1, 1]]}})
+    checks.append(Check("POST /suggestions: degenerate profile -> 400", resp.status_code == 400, resp.text))
+
+    return checks
+
+
 def main() -> int:
     # Snapshot history before anything runs: check_section/_from_dxf/_beam
     # all trigger their own history-logging as a side effect of exercising
@@ -679,6 +777,7 @@ def main() -> int:
         + check_beam(rectangle_section_id)
         + check_history()
         + check_baseline()
+        + check_suggestions()
     )
 
     history_after = client.get("/history").json()

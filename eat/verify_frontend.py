@@ -49,6 +49,13 @@ renders what comes back, for three flows:
    isolation in eat/verify_baseline.py; this only checks the UI wiring
    end-to-end. The baseline selection is restored to its pre-test state
    afterward, same as the history sweep above.
+6. With that same rectangle still loaded, open the Suggestions panel ->
+   confirm it starts collapsed like "More Info", lists the solid bar's one
+   finding, and that hovering it paints the highlight onto the sketch
+   canvas (counted in --warning pixels, a colour nothing else draws in)
+   while clicking pins it so it survives the mouse leaving. Whether the
+   suggestions themselves are sound is judged in
+   eat/verify_suggestions.py, against profiles with known right answers.
 
 Also checks two smaller additions to the sketch canvas / results panel:
 
@@ -293,7 +300,9 @@ def main() -> int:
                     f"{secondary_count} rows",
                 )
             )
-            more_info_open = page.locator(".more-info").get_attribute("open")
+            # Scoped to the results panel: the Suggestions section is a
+            # second <details class="more-info"> on the page.
+            more_info_open = page.locator("#section-results .more-info").get_attribute("open")
             checks.append(Check("Sketch flow: 'More Info' is collapsed by default", more_info_open is None))
 
             solid_fill_hidden = page.locator("#solid-fill-comparison").evaluate("el => el.hidden")
@@ -829,6 +838,85 @@ def main() -> int:
                     f"{metrics_after_restart}",
                 )
             )
+
+            # --- Flow 6: suggestions panel ---
+            # The rectangle fixture is still loaded from flow 5, and a solid
+            # bar has exactly one thing to say about it (see
+            # eat/verify_suggestions.py) -- so this checks the panel is
+            # collapsed by default, lists that finding, and paints it onto
+            # the sketch when hovered and keeps it there when clicked.
+            page.wait_for_selector("#suggestions-section:not([hidden])", timeout=8000)
+            suggestions_open = page.locator("#suggestions-section details").get_attribute("open")
+            checks.append(
+                Check("Suggestions: section is collapsed by default, like 'More Info'", suggestions_open is None)
+            )
+
+            page.locator("#suggestions-section summary").click()
+            page.wait_for_selector("#suggestion-list .suggestion", timeout=5000)
+            titles = page.locator(".suggestion__title").all_inner_texts()
+            checks.append(
+                Check(
+                    "Suggestions: the solid rectangle's wasted-core finding is listed",
+                    len(titles) == 1 and "middle third" in titles[0],
+                    f"{titles}",
+                )
+            )
+            checks.append(
+                Check(
+                    "Suggestions: the finding names the geometry it applies to",
+                    page.locator(".suggestion__detail").count() == 1
+                    and "Ixx" in page.locator(".suggestion__detail").first.inner_text(),
+                    page.locator(".suggestion__detail").first.inner_text()[:120],
+                )
+            )
+
+            # Pixel-level: the highlight is drawn in --warning (#FFB84D), a
+            # colour nothing else on the canvas uses, so counting those
+            # pixels says whether it actually rendered rather than just
+            # whether a class got toggled.
+            def warning_pixels():
+                return page.evaluate(
+                    """
+                    () => {
+                        const canvas = document.getElementById('sketch-canvas');
+                        const data = canvas.getContext('2d')
+                            .getImageData(0, 0, canvas.width, canvas.height).data;
+                        let n = 0;
+                        for (let i = 0; i < data.length; i += 4) {
+                            if (Math.abs(data[i] - 255) < 25 && Math.abs(data[i + 1] - 184) < 35
+                                && Math.abs(data[i + 2] - 77) < 45) n++;
+                        }
+                        return n;
+                    }
+                    """
+                )
+
+            before_hover = warning_pixels()
+            page.locator(".suggestion").first.hover()
+            page.wait_for_timeout(250)
+            during_hover = warning_pixels()
+            checks.append(
+                Check(
+                    "Suggestions: hovering one highlights it on the sketch canvas",
+                    before_hover == 0 and during_hover > 0,
+                    f"before={before_hover}, hovering={during_hover}",
+                )
+            )
+
+            page.locator(".suggestion").first.click()
+            page.mouse.move(5, 5)
+            page.wait_for_timeout(250)
+            pinned_class = page.locator(".suggestion").first.get_attribute("class") or ""
+            checks.append(
+                Check(
+                    "Suggestions: clicking pins the highlight so it survives the mouse leaving",
+                    "suggestion--pinned" in pinned_class and warning_pixels() > 0,
+                    f"class={pinned_class!r}, pixels={warning_pixels()}",
+                )
+            )
+
+            page.locator(".suggestion").first.click()  # unpin, so the screenshot is clean
+            page.wait_for_timeout(150)
 
             screenshot_path.parent.mkdir(parents=True, exist_ok=True)
             page.screenshot(path=str(screenshot_path), full_page=True)
