@@ -4,7 +4,7 @@ Verification harness for the frontend (build step 6).
 Drives the actual page with a headless browser (Playwright) rather than
 re-testing the math (already verified in steps 1-5): this checks that the
 frontend calls the right endpoints with the right payloads and correctly
-renders what comes back, for three flows:
+renders what comes back, for these flows:
 
 1. Sketch a 50x100mm rectangle by clicking its four corners -> close loop
    -> confirm the resulting POST /section response has the exact step-1
@@ -18,7 +18,12 @@ renders what comes back, for three flows:
    Analyze beam -> confirm POST /beam's max_moment matches the material-
    independent closed-form value (|P|*L/4) exactly, max_deflection matches
    |P|*L^3/(48*E*Ixx) for 6061's actual E, and both charts rendered an SVG
-   path.
+   path. This runs against the KJN profile still loaded from flow 2, which
+   -- conveniently for testing -- has two walls (curved, unrestrained bore
+   ribs) that eat.local_buckling genuinely cannot classify, so this flow
+   also confirms the Local (Plate) Buckling panel renders "Not classified"
+   plus the caveat explaining why for those, real k/class/SF numbers for
+   the rest, and one table row per API segment.
 4. Open the History panel -> confirm the three runs above appear,
    most-recent-first, with the top row tagged as the beam analysis ->
    click it to reload -> confirm no new POST /section or /beam fired (the
@@ -57,6 +62,27 @@ renders what comes back, for three flows:
    suggestions themselves are sound is judged in
    eat/verify_suggestions.py, against profiles with known right answers.
 
+7. Local (plate) buckling, reference case: a 60x40mm tube with a 1.2mm
+   wall (3mm fillets), built with ezdxf and imported fresh -- 6063-T6
+   Aluminum, 2m simply supported, an 800N mid-span point load, a 4kN axial
+   load. This is the case documented in eat/local_buckling.py and this
+   session's backend verification: global Euler buckling passes
+   comfortably (SF ~2.74) while one wall's local plate buckling fails
+   (SF ~0.77), which is the entire reason this check exists -- the global
+   number alone would call the design safe. Confirms every field of every
+   segment the API returns against an independent recomputation from the
+   same vertices (eat.beam + eat.local_buckling, called directly, not
+   through HTTP), then confirms every number actually on screen against
+   that same API response (parsed back out of the table, allowing only
+   for display rounding) -- not "a table rendered," but "this table cell,
+   for this wall, holds this number." Also confirms the governing wall's
+   row is visually marked, and, importing the plain rectangle_50x100.dxf
+   fixture afterward, that the panel disappears entirely for a profile
+   with no wall structure to report (a solid bar) rather than rendering
+   an empty table, while the Euler result above it still renders fully --
+   the two are meant to read as separate results, never as one merged
+   into the other.
+
 Also checks two smaller additions to the sketch canvas / results panel:
 
 - Axis indicator: a fixed corner gizmo on the sketch canvas showing which
@@ -87,17 +113,23 @@ Run with: python -m eat.verify_frontend [screenshot_path]
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
+import ezdxf
 from playwright.sync_api import sync_playwright
 
+from eat.beam import BoundaryCondition, PointLoad, analyze_beam
+from eat.local_buckling import analyze_local_buckling
 from eat.materials import get_material
 from eat.section import analyze_section
+from eat.verify_local_buckling import rounded_rect
 
 PORT = 8799
 BASE_URL = f"http://127.0.0.1:{PORT}"
@@ -112,6 +144,14 @@ class Check:
     label: str
     passed: bool
     detail: str = ""
+
+
+def _title_case_label(text: str) -> str:
+    """Python port of app.js's titleCaseLabel -- must stay in lockstep with
+    it, since this is what a test computes as the DOM's expected text."""
+    return " ".join(
+        w[0].upper() + w[1:] if re.fullmatch(r"[A-Za-z]+", w) else w for w in text.split(" ")
+    )
 
 
 def wait_for_server(timeout=20):
@@ -687,6 +727,108 @@ def main() -> int:
             defl_svg = page.locator("#chart-deflection svg path.chart-line").count()
             checks.append(Check("Beam flow: both charts rendered a data line", stress_svg == 1 and defl_svg == 1))
 
+            # Local (plate) buckling was wired into this same /beam call, and
+            # the KJN profile (still loaded from flow 2) happens to have two
+            # genuinely unclassifiable walls -- curved, unrestrained bore
+            # ribs, per eat.local_buckling -- so this is the natural place
+            # to check the "Not classified" rendering path without building
+            # a dedicated fixture for it.
+            lb_resp = beam_resp.get("local_buckling") if beam_resp else None
+            checks.append(
+                Check(
+                    "Local buckling: /beam response carries a local_buckling block with segments",
+                    lb_resp is not None and len(lb_resp.get("segments", [])) > 0,
+                    f"{lb_resp}",
+                )
+            )
+            if lb_resp:
+                page.wait_for_selector("#local-buckling-section:not([hidden])", timeout=5000)
+                # inner_text() returns the rendered text -- .panel__subtitle
+                # is upper-cased via CSS (text-transform), so compare
+                # case-insensitively rather than against the source casing.
+                subtitle = page.locator("#local-buckling-section h3").inner_text().upper()
+                checks.append(
+                    Check(
+                        "Local buckling: has its own heading, distinguishing it from Euler buckling above",
+                        "LOCAL" in subtitle and "PLATE" in subtitle and "BUCKLING" in subtitle,
+                        f"{subtitle!r}",
+                    )
+                )
+
+                segments = lb_resp["segments"]
+                uncertain_segments = [s for s in segments if s["support"] == "uncertain"]
+                classified_segments = [s for s in segments if s["support"] != "uncertain"]
+                checks.append(
+                    Check(
+                        "Local buckling: KJN's genuinely unclassifiable walls (curved / unrestrained) are present",
+                        len(uncertain_segments) > 0,
+                        f"{len(uncertain_segments)} of {len(segments)} segments uncertain",
+                    )
+                )
+
+                all_rows = page.locator("#local-buckling-table tr[data-wall]").count()
+                caveat_rows = page.locator("#local-buckling-table tr.local-buckling-table__caveat").count()
+                checks.append(
+                    Check(
+                        "Local buckling: one table row per segment the API returned",
+                        all_rows - caveat_rows == len(segments),
+                        f"rows={all_rows}, caveat rows={caveat_rows}, segments={len(segments)}",
+                    )
+                )
+
+                if uncertain_segments:
+                    u = uncertain_segments[0]
+                    u_row = page.locator(
+                        f'#local-buckling-table tr[data-wall="{u["index"]}"]:not(.local-buckling-table__caveat)'
+                    )
+                    u_cells = u_row.locator("td").all_inner_texts()
+                    checks.append(
+                        Check(
+                            "Local buckling: an unclassifiable wall shows 'Not classified', not blank",
+                            len(u_cells) == 10 and u_cells[1] == "Not classified",
+                            f"{u_cells}",
+                        )
+                    )
+                    checks.append(
+                        Check(
+                            "Local buckling: an unclassifiable wall's k / sigma_cr / class / SF read "
+                            "'—', not blank and not a fabricated number",
+                            len(u_cells) == 10
+                            and u_cells[5] == "—"
+                            and u_cells[6] == "—"
+                            and u_cells[7] == "—"
+                            and u_cells[9] == "—",
+                            f"{u_cells}",
+                        )
+                    )
+                    u_caveat_text = page.locator(
+                        f'#local-buckling-table tr.local-buckling-table__caveat[data-wall="{u["index"]}"] td'
+                    ).inner_text()
+                    checks.append(
+                        Check(
+                            "Local buckling: the reason it can't be classified is shown, not just the state",
+                            u_caveat_text == " · ".join(u["caveats"]) and len(u["caveats"]) > 0,
+                            f"caveats={u['caveats']}, shown={u_caveat_text!r}",
+                        )
+                    )
+
+                if classified_segments:
+                    c = classified_segments[0]
+                    c_row = page.locator(
+                        f'#local-buckling-table tr[data-wall="{c["index"]}"]:not(.local-buckling-table__caveat)'
+                    )
+                    c_cells = c_row.locator("td").all_inner_texts()
+                    checks.append(
+                        Check(
+                            "Local buckling: a classifiable wall shows a real edge condition, not "
+                            "'Not classified'",
+                            len(c_cells) == 10
+                            and c_cells[1] == _title_case_label(c["supports_label"])
+                            and c_cells[5] != "—",
+                            f"{c_cells}",
+                        )
+                    )
+
             # --- Flow 4: run history ---
             post_log_before_history = list(post_log)
 
@@ -1022,6 +1164,263 @@ def main() -> int:
 
             page.locator(".suggestion").first.click()  # unpin, so the screenshot is clean
             page.wait_for_timeout(150)
+
+            # A solid bar has no wall structure for this check to say
+            # anything about (see eat/verify_local_buckling.py) -- confirm
+            # the panel disappears entirely rather than rendering an empty
+            # table, while the Euler summary above it still renders fully.
+            # Reuses the existing rectangle_50x100.dxf fixture; no new file.
+            # Run before the tube reference case below (not after), so the
+            # final screenshot shows the actual new panel in action rather
+            # than this "nothing to show" state.
+            #
+            # #input-length is filled explicitly rather than relying on
+            # whatever flow 3 last left it at: flow 5's post-restart
+            # page.reload() above resets every form value to blank, and
+            # nothing beam-related runs between there and here to refill it.
+            page.click("#btn-clear")
+            captured.pop("/section/from-dxf", None)
+            captured.pop("/beam", None)
+            page.set_input_files(
+                "#dxf-file-input", str(PROJECT_ROOT / "eat" / "fixtures" / "rectangle_50x100.dxf")
+            )
+            page.wait_for_selector("#section-results:not([hidden])", timeout=5000)
+            page.fill("#input-length", "1000")
+            page.click("#btn-analyze-beam")
+            page.wait_for_selector("#beam-results:not([hidden])", timeout=5000)
+            page.wait_for_timeout(150)
+            checks.append(
+                Check(
+                    "Local buckling flow: hidden entirely for a solid bar (no wall structure to report), "
+                    "while the Euler result above it still renders",
+                    page.locator("#local-buckling-section").is_hidden()
+                    and page.locator("#beam-summary-grid dt").count() > 0,
+                )
+            )
+
+            # --- Flow 7: local (plate) buckling panel, reference case ---
+            # The documented reference case from this session's backend work:
+            # a 60x40 tube with a 1.2mm wall (3mm outer/inner fillets), 2m
+            # simply supported, an 800N mid-span point load and a 4kN axial
+            # load. Global Euler buckling comfortably passes (SF ~2.74) while
+            # one wall's local plate buckling fails (SF ~0.77) -- exactly the
+            # case this feature exists to catch and the Euler check alone
+            # would miss. Built directly with ezdxf (temp dir kept inside the
+            # project tree, not the OS default, per this project's sandbox
+            # convention -- see eat/verify_dxf.py) rather than committing a
+            # new binary fixture for one geometry only this check uses.
+            outer_pts = rounded_rect(0, 0, 60, 40, 3.0)
+            hole_pts = rounded_rect(1.2, 1.2, 58.8, 38.8, 3.0, ccw=False)
+
+            with tempfile.TemporaryDirectory(dir=PROJECT_ROOT / "eat") as tmp:
+                tube_path = Path(tmp) / "tube_60x40_1p2mm.dxf"
+                doc = ezdxf.new(dxfversion="R2010")
+                doc.units = ezdxf.units.MM
+                msp = doc.modelspace()
+                outer_pl = msp.add_lwpolyline(outer_pts)
+                outer_pl.closed = True
+                hole_pl = msp.add_lwpolyline(hole_pts)
+                hole_pl.closed = True
+                doc.saveas(tube_path)
+
+                page.click("#btn-clear")
+                captured.pop("/section/from-dxf", None)
+                captured.pop("/beam", None)
+                page.select_option("#material-select", label="6063-T6 Aluminum (Extruded)")
+                page.set_input_files("#dxf-file-input", str(tube_path))
+                page.wait_for_selector("#section-results:not([hidden])", timeout=5000)
+
+            tube_section_resp = captured.get("/section/from-dxf")
+            checks.append(Check("Local buckling flow: tube profile imported", tube_section_resp is not None))
+
+            page.fill("#input-length", "2000")
+            page.select_option("#input-bc", "simply_supported")
+            while page.locator(".point-load-row__remove").count() > 0:
+                page.locator(".point-load-row__remove").first.click()
+            page.click("#btn-add-load")
+            page.locator(".point-load-row input.input").nth(0).fill("0.5")
+            page.locator(".point-load-row input.input").nth(1).fill("-800")
+            page.fill("#input-axial", "4000")
+            page.click("#btn-analyze-beam")
+            page.wait_for_selector("#beam-results:not([hidden])", timeout=5000)
+            page.wait_for_selector("#local-buckling-section:not([hidden])", timeout=5000)
+
+            tube_beam_resp = captured.get("/beam")
+            checks.append(Check("Local buckling flow: POST /beam captured for the tube", tube_beam_resp is not None))
+
+            if tube_beam_resp:
+                # Independent re-derivation of the same scenario from the
+                # exact vertices used to build the DXF -- not "the API
+                # returned something", but "the API and the display both
+                # agree with the math, computed a second way". This is
+                # what ties the captured/rendered numbers back to the
+                # documented reference case (global SF 2.74 / local SF
+                # 0.77) rather than the test just trusting its own server.
+                material = get_material("6063-T6 Aluminum (Extruded)")
+                expected_section = analyze_section(outer_pts, material, holes=[hole_pts])
+                expected_beam = analyze_beam(
+                    expected_section,
+                    material,
+                    length=2000.0,
+                    boundary_condition=BoundaryCondition.SIMPLY_SUPPORTED,
+                    point_loads=[PointLoad(0.5, -800.0)],
+                    axial_load=4000.0,
+                )
+                expected_lb = analyze_local_buckling(
+                    outer_pts,
+                    [hole_pts],
+                    material,
+                    applied_axial_stress=abs(4000.0) / expected_section.area,
+                    moment=expected_beam.max_moment,
+                    bending_axis=expected_beam.load_axis,
+                    section=expected_section,
+                )
+                rated = [s for s in expected_lb.segments if s.safety_factor is not None]
+                expected_governing = min(rated, key=lambda s: s.safety_factor) if rated else None
+
+                checks.append(
+                    Check(
+                        "Local buckling flow: reproduces the documented reference case "
+                        "(global Euler SF ~2.74, worst local plate SF ~0.77)",
+                        expected_governing is not None
+                        and _rel_close(expected_beam.buckling_safety_factor, 2.74, tol=2e-3)
+                        and _rel_close(expected_governing.safety_factor, 0.77, tol=2e-3),
+                        f"global SF={expected_beam.buckling_safety_factor:.4f}, "
+                        f"worst local SF={expected_governing.safety_factor if expected_governing else None}",
+                    )
+                )
+                checks.append(
+                    Check(
+                        "Local buckling flow: API's global buckling SF matches the independent computation",
+                        _rel_close(
+                            tube_beam_resp["buckling_safety_factor"], expected_beam.buckling_safety_factor, 1e-4
+                        ),
+                        f"api={tube_beam_resp['buckling_safety_factor']}, "
+                        f"expected={expected_beam.buckling_safety_factor}",
+                    )
+                )
+
+                api_lb = tube_beam_resp.get("local_buckling")
+                checks.append(
+                    Check(
+                        "Local buckling flow: API's local_buckling has one segment per expected wall",
+                        api_lb is not None and len(api_lb["segments"]) == len(expected_lb.segments),
+                        f"api={len(api_lb['segments']) if api_lb else None}, expected={len(expected_lb.segments)}",
+                    )
+                )
+
+                if api_lb and len(api_lb["segments"]) == len(expected_lb.segments):
+                    # 1. API JSON vs. the independent computation -- same
+                    #    physics, computed twice, from the same vertices.
+                    field_tol = {
+                        "width": 3e-3,
+                        "thickness": 3e-3,
+                        "slenderness": 3e-3,
+                        "k": 3e-3,
+                        "elastic_critical_stress": 1e-2,
+                        "applied_stress": 1e-2,
+                        "safety_factor": 1.5e-2,
+                    }
+                    mismatches = []
+                    api_by_index = {s["index"]: s for s in api_lb["segments"]}
+                    for exp_seg in expected_lb.segments:
+                        api_seg = api_by_index.get(exp_seg.index)
+                        if api_seg is None:
+                            mismatches.append(f"wall {exp_seg.index}: no matching API segment")
+                            continue
+                        if api_seg["support"] != exp_seg.support:
+                            mismatches.append(
+                                f"wall {exp_seg.index} support: api={api_seg['support']} expected={exp_seg.support}"
+                            )
+                        if api_seg["section_class"] != exp_seg.section_class:
+                            mismatches.append(
+                                f"wall {exp_seg.index} class: api={api_seg['section_class']} "
+                                f"expected={exp_seg.section_class}"
+                            )
+                        for field, tol in field_tol.items():
+                            av, ev = api_seg[field], getattr(exp_seg, field)
+                            if (av is None) != (ev is None):
+                                mismatches.append(f"wall {exp_seg.index} {field}: api={av} expected={ev}")
+                            elif av is not None and not _rel_close(av, ev, tol):
+                                mismatches.append(f"wall {exp_seg.index} {field}: api={av} expected={ev}")
+                    checks.append(
+                        Check(
+                            "Local buckling flow: every field of every segment matches the "
+                            "independent computation",
+                            len(mismatches) == 0,
+                            "; ".join(mismatches[:8]),
+                        )
+                    )
+
+                    # 2. What's actually on screen vs. the API JSON -- the
+                    #    part of this that's actually a frontend test.
+                    dom_mismatches = []
+                    for seg in api_lb["segments"]:
+                        row = page.locator(
+                            f'#local-buckling-table tr[data-wall="{seg["index"]}"]:not(.local-buckling-table__caveat)'
+                        )
+                        cells = row.locator("td").all_inner_texts()
+                        if len(cells) != 10:
+                            dom_mismatches.append(f"wall {seg['index']}: expected 10 cells, got {len(cells)}")
+                            continue
+
+                        def parse(text):
+                            return None if text == "—" else float(text.replace(",", ""))
+
+                        expected_edges = (
+                            "Not classified"
+                            if seg["support"] == "uncertain"
+                            else _title_case_label(seg["supports_label"])
+                        )
+                        if cells[0] != str(seg["index"]):
+                            dom_mismatches.append(f"wall {seg['index']}: # cell shows {cells[0]!r}")
+                        if cells[1] != expected_edges:
+                            dom_mismatches.append(
+                                f"wall {seg['index']}: edges cell shows {cells[1]!r}, expected {expected_edges!r}"
+                            )
+                        shown_class = None if cells[7] == "—" else int(cells[7])
+                        if shown_class != seg["section_class"]:
+                            dom_mismatches.append(
+                                f"wall {seg['index']} class: shown={shown_class}, api={seg['section_class']}"
+                            )
+                        for key, col, tol in (
+                            ("width", 2, 3e-3),
+                            ("thickness", 3, 3e-3),
+                            ("slenderness", 4, 3e-3),
+                            ("k", 5, 3e-3),
+                            ("elastic_critical_stress", 6, 1e-2),
+                            ("applied_stress", 8, 1e-2),
+                            ("safety_factor", 9, 1.5e-2),
+                        ):
+                            api_val = seg[key]
+                            shown = parse(cells[col])
+                            if (api_val is None) != (shown is None):
+                                dom_mismatches.append(f"wall {seg['index']} {key}: shown={shown}, api={api_val}")
+                            elif api_val is not None and not _rel_close(shown, api_val, tol):
+                                dom_mismatches.append(f"wall {seg['index']} {key}: shown={shown}, api={api_val}")
+                    checks.append(
+                        Check(
+                            "Local buckling flow: every displayed number matches the API response "
+                            "(exactly, allowing for display rounding)",
+                            len(dom_mismatches) == 0,
+                            "; ".join(dom_mismatches[:8]),
+                        )
+                    )
+
+                    governing_row_class = (
+                        page.locator(
+                            f'#local-buckling-table tr[data-wall="{api_lb["governing_index"]}"]'
+                            ":not(.local-buckling-table__caveat)"
+                        ).get_attribute("class")
+                        or ""
+                    )
+                    checks.append(
+                        Check(
+                            "Local buckling flow: the governing (worst SF) wall's row is visually marked",
+                            "local-buckling-table__row--governing" in governing_row_class,
+                            f"class={governing_row_class!r}",
+                        )
+                    )
 
             screenshot_path.parent.mkdir(parents=True, exist_ok=True)
             page.screenshot(path=str(screenshot_path), full_page=True)

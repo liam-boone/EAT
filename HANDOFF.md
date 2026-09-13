@@ -23,25 +23,26 @@ session can resume without re-reading the whole repo. Keep it that way:
 
 ## State as of this handoff
 
-Last commit: medial-axis wall thickness, narrow-notch detection, and local
-(plate) buckling — pushed to `origin/main`. (Update this line with the
-real hash once committed.)
+Last commit: local-buckling frontend panel (table inside Beam Results,
+Playwright-verified against the 1.2mm tube reference case). Backend
+(medial-axis thickness, narrow-notch detection, local plate buckling) was
+committed just before it in a separate commit. Both pushed to
+`origin/main`.
 
 All 12 spec build steps are done, plus backlog items: run history,
 baseline comparison (dual-bar redesign), DFM/stiffness suggestions, PDF
 engineering-drawing import, medial-axis thickness, narrow-notch detection,
-and local (plate) buckling.
+and local (plate) buckling — backend and frontend both shipped.
 
-**In flight right now:** rendering the local-buckling results (already in
-the `/beam` API response) in the frontend. Backend/API for all three
-approved steps is committed; this is a direct, approved follow-up, not a
-new feature under review.
+No pending user request beyond this — the last explicit task (local
+buckling: backend + frontend panel) is complete, verified, committed, and
+pushed.
 
 - `eat/thickness.py` — medial-axis (max-inscribed-circle) thickness
   primitive, verified in `eat/verify_thickness.py` (25 checks). Both
   `thin_wall` and `thick_wall` suggestion checks run off it now; the old
   ray-cast sampler is gone.
-- `eat/suggestions.py` — `narrow_notch` check added (9 fixtures in
+- `eat/suggestions.py` — `narrow_notch` check (9 fixtures in
   `verify_suggestions.py`). **Deliberately scoped narrower than the
   original backlog ask**: fires only when a notch leaves less than the
   ~1.0mm practical minimum wall, not on depth-ratio alone. A functional
@@ -58,29 +59,39 @@ new feature under review.
   classified per EN 1999-1-1 Table 6.2, cross-checked against a published
   7A04-T6 worked example (7.75/11.28/15.50) reproduced from the project's
   own 7075-T6 entry. Edge condition (internal vs. outstand) is classified
-  per wall from the actual geometry, not assumed. README.md and the
-  spec's "no local/plate buckling" v1 boundary are updated to match
-  (explicit ask, not scope creep).
-- **Frontend panel — in progress.** `frontend/index.html` /
-  `frontend/app.js` / `frontend/styles.css`: a "Local (Plate) Buckling"
-  table inside the Beam Results panel, between the summary tiles and the
-  charts, visually separated (its own `panel__subtitle`) from the Euler
-  summary tiles above rather than merged into them. Per wall: b, t, b/t,
-  edge condition, k, σcr, EN 1999-1-1 class, applied stress, SF. Governing
-  wall gets an accent left-border; a wall the model can't classify shows
-  "Not classified" plus its caveat text instead of blank/misleading
-  fields. Verify with Playwright against the 1.2mm-walled tube reference
-  case (global SF 2.74, local SF 0.77) before calling this done.
+  per wall from the actual geometry, not assumed.
+- **Frontend panel — done.** `frontend/index.html` / `frontend/app.js` /
+  `frontend/styles.css`: a "Local (Plate) Buckling" table inside the Beam
+  Results panel, between the summary tiles and the charts, visually
+  separated (its own `panel__subtitle`, its own top border) from the
+  Euler summary tiles above rather than merged into them. Per wall: b, t,
+  b/t, edge condition, k, σcr, EN 1999-1-1 class, applied stress, SF (SF
+  color-coded via the same `.sf-danger/warning/good` classes the Euler
+  tile already uses — generalized from `dd.sf-*` to `.sf-*` so a `<td>`
+  can use them too). Governing wall gets an accent left-border. A wall
+  the model can't classify shows "Not classified" plus its caveat text
+  in a note row beneath, never blank. Verified in `eat/verify_frontend.py`
+  (new checks, not a separate script — see "Verification convention"
+  below): the KJN profile (already loaded in an earlier flow) has 2
+  genuinely unclassifiable walls, used to check the "Not classified" path
+  against real caveat text; a fresh 1.2mm-walled 60x40 tube (built with
+  ezdxf, imported via the real DXF-import path, not synthesized data)
+  reproduces the documented reference case exactly — global Euler SF
+  2.7411, worst local plate SF 0.7712 — with every table cell checked
+  against the live API response; and a solid bar confirms the panel
+  disappears entirely (not an empty table) when there's no wall structure
+  to report, while Euler still renders normally above it.
 
 **Working tree right now:**
 - `extrusion-fea-tool-spec.md` has uncommitted local edits that are
   **Liam's own backlog notes** (a "Frontend sweep" section and further
-  backlog restructuring) — **left out of the commit**, per the standing
-  "leave these alone" rule. The scope-claim fix Liam asked for in step 3
-  is folded into his own edits to that file now (both are in the working
-  tree together) and wasn't cleanly separable, so it rides along
-  uncommitted too. Liam can commit that file himself when he's done
-  editing it, or ask for it to be split out.
+  backlog restructuring) — **left out of both commits**, per the standing
+  "leave these alone" rule. The local/plate-buckling scope-claim fix he
+  asked for is folded into his own edits to that file now and wasn't
+  cleanly separable; it rides along uncommitted. Liam can commit that
+  file himself when he's done editing it, or ask for it to be split out.
+  `README.md`'s equivalent scope claim (a file with no competing edits)
+  **is** committed.
 - 8 untracked PDF files in the project root (`B18 - Tower - Extrusion -
   *.pdf`, `RDEX05120940 ...pdf`) — real supplier drawings Liam added for
   testing the PDF importer. Their title blocks mark them confidential.
@@ -88,6 +99,22 @@ new feature under review.
   required for `eat/verify_pdf.py` and parts of `verify_api.py`/
   `verify_frontend.py` to run — those scripts skip/fail gracefully if the
   files are missing, but keep them in the working directory.
+- **`eat/history.json` grew ~4x (291KB → 1.1MB, ~42 entries) during this
+  session** — an interrupted/crashed debug run of a throwaway Playwright
+  repro script (outside the committed test suite, in the scratchpad)
+  skipped the normal sweep-up-on-exit cleanup and left its test entries
+  behind. All 42 entries are dated today and match automated-test
+  fixtures (4-vertex rectangles, 246/600-vertex KJN/PDF geometries,
+  repeating "6061-T6"/"6063-T6" material names) — there's no sign any of
+  it is Liam's real usage, but it was **left untouched rather than
+  deleted unilaterally** since it's Liam's runtime app data and the call
+  is his. `eat/baseline.json` had the same problem (left pointing at a
+  test-created history entry) and **was** reset, since it's a disposable
+  single-preference pointer, not accumulated data — it's back to
+  `{"type": "builtin"}`, its correct default. If Liam wants history.json
+  cleared, either wipe it from the app's History panel or delete the file
+  (its absence is a valid empty-history state, same pattern as
+  baseline.json).
 
 ## Conventions (don't relitigate these)
 
@@ -98,7 +125,14 @@ new feature under review.
   advisory mass-check note in g/cm³. Full table in `UNITS.md`.
 - **Verification convention**: every backend module has a companion
   `eat/verify_X.py` with hand-calculable/cross-checked assertions, not
-  "does it run." Run the full suite before any commit:
+  "does it run." There is exactly ONE frontend Playwright script,
+  `eat/verify_frontend.py` — new frontend behavior gets a new flow (or
+  checks appended to an existing flow, reusing whatever profile is
+  already loaded at that point) inside that file, not a new script; it
+  restores `eat/history.json` and `eat/baseline.json` to their pre-run
+  state on every clean exit, so run it rather than hand-testing when a
+  change touches state that persists across page loads. Run the full
+  suite before any commit:
   ```
   for m in materials section dxf beam history baseline thickness \
            suggestions local_buckling pdf api; do
@@ -106,6 +140,10 @@ new feature under review.
   done
   python -m eat.verify_frontend   # Playwright, slower, needs `playwright install chromium`
   ```
+  If a `verify_frontend.py` run is ever killed/crashes mid-flow (Ctrl-C,
+  a debugging script that bypasses it, a hung `wait_for_selector`), its
+  cleanup won't run — check `eat/history.json`'s size and
+  `eat/baseline.json`'s content afterward before trusting them.
 - **"Frozen, not recomputed"**: a reloaded history entry always shows the
   exact stored result, never a live recompute — guarantees reproducibility.
 - **"Always fresh"**: derived comparisons (solid-fill, baseline,
@@ -118,7 +156,6 @@ new feature under review.
 
 ## Known open items (not yet built)
 
-- **Local-buckling frontend panel** — in progress, see above.
 - **Notches that leave a manufacturable wall** — the part of the
   narrow-notch backlog item that is *not* solved. A slot leaving 1.5mm in
   a 4mm wall is a real stress riser and is not reported. Not solvable by

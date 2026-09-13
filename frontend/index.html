@@ -159,6 +159,21 @@
 
     <dl class="result-grid result-grid--summary" id="beam-summary-grid"></dl>
 
+    <div id="local-buckling-section" class="local-buckling-section" hidden>
+      <h3 class="panel__subtitle">
+        Local (Plate) Buckling <span class="optional-tag">per wall &mdash; separate from Euler buckling above</span>
+      </h3>
+      <p class="hint">
+        Each flat wall checked as its own plate (k=4.0 both edges supported / k=0.425 outstand;
+        EN 1999-1-1 Table 6.2 classification). A wall can buckle locally well before the column
+        as a whole does, so this result stands on its own rather than folding into the Euler
+        figures above.
+      </p>
+      <div class="local-buckling-table-wrap">
+        <table class="dim-check-table local-buckling-table" id="local-buckling-table"></table>
+      </div>
+    </div>
+
     <div class="charts">
       <div class="chart-container">
         <h3 class="chart-title">Bending Stress Along Length</h3>

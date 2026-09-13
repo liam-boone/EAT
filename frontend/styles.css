@@ -595,16 +595,18 @@ button, input, select {
   font-weight: 700;
 }
 
-/* Safety-factor thresholds: <1 fails, <1.5 marginal, else safe (accent). */
-dd.sf-danger {
+/* Safety-factor thresholds: <1 fails, <1.5 marginal, else safe (accent).
+   Not scoped to <dd> -- the local-buckling table below applies the same
+   classes to <td>, and the coloring means the same thing in both. */
+.sf-danger {
   color: var(--danger);
 }
 
-dd.sf-warning {
+.sf-warning {
   color: var(--warning);
 }
 
-dd.sf-good {
+.sf-good {
   color: var(--accent);
 }
 
@@ -959,4 +961,47 @@ dd.sf-good {
 
 .pdf-warning-list li {
   margin-bottom: var(--space-1);
+}
+
+/* ------------------------------------------------------------------
+   Local (plate) buckling -- per-wall table, reusing the dim-check-table
+   convention (small mono-numeral table) rather than inventing a new one.
+------------------------------------------------------------------ */
+
+.local-buckling-section {
+  margin-top: var(--space-2);
+}
+
+.local-buckling-table-wrap {
+  overflow-x: auto;
+}
+
+.local-buckling-table {
+  min-width: 760px;
+}
+
+/* The governing wall (lowest safety factor, or worst class with no load
+   given) is the one key result of this table -- the accent left-border is
+   the same "this is the answer" language the design tokens reserve it for. */
+.local-buckling-table__row--governing td:first-child {
+  border-left: 2px solid var(--accent);
+  padding-left: 6px;
+}
+
+/* A wall whose geometry doesn't cleanly fit a plate model (tapered, not
+   parallel-faced, curved, only one face resolved, free at both ends) gets
+   no k / critical stress / class / safety factor -- shown as an explicit
+   "Not classified" plus the reason, never left blank. */
+.local-buckling-table__row--uncertain .lb-support {
+  color: var(--text-secondary);
+  font-style: italic;
+}
+
+.local-buckling-table__caveat td {
+  padding-top: 0;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-tertiary);
+  font-size: 0.74rem;
+  font-style: italic;
+  font-family: var(--font-sans);
 }

@@ -68,6 +68,8 @@ const btnAnalyzeBeam = document.getElementById("btn-analyze-beam");
 
 const beamResultsEl = document.getElementById("beam-results");
 const beamSummaryGrid = document.getElementById("beam-summary-grid");
+const localBucklingSectionEl = document.getElementById("local-buckling-section");
+const localBucklingTableEl = document.getElementById("local-buckling-table");
 const chartStressEl = document.getElementById("chart-stress");
 const chartDeflectionEl = document.getElementById("chart-deflection");
 
@@ -1210,6 +1212,8 @@ function renderBeamResults(r) {
     );
   });
 
+  renderLocalBuckling(r.local_buckling);
+
   drawLineChart(chartStressEl, r.diagram_x, r.bending_stress_diagram, {
     xLabel: "Position Along Length",
     xUnit: "mm",
@@ -1228,6 +1232,87 @@ function renderBeamResults(r) {
     markerX: r.max_deflection_position,
     markerY: r.max_deflection,
     forceZeroBaseline: false,
+  });
+}
+
+/** Per-wall local (plate) buckling table (eat.local_buckling), shown as
+ * its own section rather than folded into the Euler summary tiles above
+ * -- the two are different failure modes (member-as-column vs.
+ * wall-as-plate) and reporting one number set as if it were the other
+ * would misstate which check actually governs.
+ *
+ * `lb` is the /beam response's `local_buckling` field: null on history
+ * entries stored before this check existed, or if the profile's geometry
+ * couldn't be segmented into wall elements at all (a solid bar, say --
+ * that's not a failure, there's just nothing here for this check to say
+ * beyond what the Euler result above already covers).
+ *
+ * A wall the model can't confidently classify (tapered, non-parallel
+ * faces, curved, only one face resolved, or free at both ends) still gets
+ * a row -- its measured slenderness (b, t, b/t) is real and shown -- but
+ * k / critical stress / class / safety factor are explicitly "Not
+ * classified" plus the reason, never blank, since a blank cell here could
+ * as easily read as "checked and fine" as "not checked at all". */
+function renderLocalBuckling(lb) {
+  localBucklingTableEl.innerHTML = "";
+  if (!lb || !lb.segments || lb.segments.length === 0) {
+    localBucklingSectionEl.hidden = true;
+    return;
+  }
+  localBucklingSectionEl.hidden = false;
+
+  const head = document.createElement("tr");
+  ["Wall", "Edges", "b (mm)", "t (mm)", "b/t", "k", "σcr (MPa)", "EC9 Class", "Applied σ (MPa)", "SF"].forEach(
+    (h) => {
+      const th = document.createElement("th");
+      th.textContent = h;
+      head.appendChild(th);
+    }
+  );
+  localBucklingTableEl.appendChild(head);
+
+  lb.segments.forEach((s) => {
+    const uncertain = s.support === "uncertain";
+    const tr = document.createElement("tr");
+    tr.dataset.wall = String(s.index); // lets a test (or anything else) find "wall 4" directly,
+    // independent of a caveat row shifting its position in the table
+    tr.className = [
+      uncertain ? "local-buckling-table__row--uncertain" : "",
+      s.index === lb.governing_index ? "local-buckling-table__row--governing" : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+
+    const cells = [
+      [String(s.index), ""],
+      [uncertain ? "Not classified" : titleCaseLabel(s.supports_label), "lb-support"],
+      [fmtNum(s.width, { digits: 2 }), ""],
+      [fmtNum(s.thickness, { digits: 2 }), ""],
+      [fmtNum(s.slenderness, { digits: 2 }), ""],
+      [s.k === null ? "—" : fmtNum(s.k, { digits: 3 }), ""],
+      [s.elastic_critical_stress === null ? "—" : fmtNum(s.elastic_critical_stress, { digits: 1 }), ""],
+      [s.section_class === null ? "—" : String(s.section_class), ""],
+      [s.applied_stress === null ? "—" : fmtNum(s.applied_stress, { digits: 1 }), ""],
+      [s.safety_factor === null ? "—" : fmtNum(s.safety_factor, { digits: 2 }), safetyFactorClass(s.safety_factor)],
+    ];
+    cells.forEach(([text, className]) => {
+      const td = document.createElement("td");
+      td.textContent = text;
+      if (className) td.className = className;
+      tr.appendChild(td);
+    });
+    localBucklingTableEl.appendChild(tr);
+
+    if (s.caveats && s.caveats.length > 0) {
+      const note = document.createElement("tr");
+      note.dataset.wall = String(s.index);
+      note.className = "local-buckling-table__caveat";
+      const td = document.createElement("td");
+      td.colSpan = cells.length;
+      td.textContent = s.caveats.join(" · ");
+      note.appendChild(td);
+      localBucklingTableEl.appendChild(note);
+    }
   });
 }
 
