@@ -31,6 +31,7 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
+from eat.history import write_json_atomically
 from eat.section import Material
 
 DEFAULT_MATERIALS_PATH = Path(__file__).parent / "materials.json"
@@ -82,9 +83,13 @@ def load_materials(path: Path | str = DEFAULT_MATERIALS_PATH) -> list[Material]:
 
 
 def save_materials(materials: list[Material], path: Path | str = DEFAULT_MATERIALS_PATH) -> None:
-    """Write the full material list back to the JSON file, converted to Pa."""
+    """Write the full material list back to the JSON file, converted to Pa.
+
+    Atomically -- a half-written materials.json leaves the material
+    dropdown empty and every analysis route erroring. See
+    `eat.history.write_json_atomically`."""
     records = [_material_to_record(m) for m in materials]
-    Path(path).write_text(json.dumps(records, indent=2, ensure_ascii=False) + "\n")
+    write_json_atomically(path, json.dumps(records, indent=2, ensure_ascii=False) + "\n")
 
 
 def get_material(name: str, path: Path | str = DEFAULT_MATERIALS_PATH) -> Material:

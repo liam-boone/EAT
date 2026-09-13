@@ -31,10 +31,24 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+import math
+
 from sectionproperties.analysis import Section
 from sectionproperties.pre import Geometry
-from shapely.geometry import Polygon
+from shapely.geometry import LinearRing, Polygon
 from shapely.geometry.polygon import orient
+
+# Nothing in the profile may be thinner than this fraction of its own
+# bounding-box diagonal. The FE mesher is a C library: handed a hairline
+# it does not raise, it takes tens of seconds, allocates unboundedly, or
+# dies on a SIGBUS that takes the whole server process with it -- and it
+# does so non-monotonically (a 100mm x 0.001mm sliver hangs, 100 x 0.0003
+# meshes fine), so there is nothing to catch and retry. Measured: every
+# sliver at or below this ratio is slow or fatal, everything above it
+# meshes in under a second. Real profiles sit orders of magnitude clear --
+# the 20x40 KJN fixture is at 4.5e-2, and a 200x200 tube with 0.8mm walls,
+# about as thin-walled as an extrusion gets, is at 1.7e-3.
+MIN_INSCRIBED_SPAN_RATIO = 1e-4
 
 
 @dataclass
@@ -63,8 +77,40 @@ class Material:
     density: float | None = None  # kg/m^3 (used only for SectionResult.mass_per_length)
 
     def __post_init__(self) -> None:
+        # Validated here rather than at the API boundary because this is
+        # also the library/CLI entry point, and because a bad modulus does
+        # not fail loudly downstream -- it propagates. E = 0 divides by
+        # zero in every deflection formula (the whole deflection curve
+        # comes back null); a negative E returns a negative Euler buckling
+        # load and a plausible-looking deflection of the wrong sign; and
+        # nu = -1 makes G = E / (2(1+nu)) divide by zero, which surfaced as
+        # a bare HTTP 500 with no message.
+        if self.E is None or not math.isfinite(self.E) or self.E <= 0:
+            raise ValueError(
+                f"Material '{self.name}': E must be a positive finite modulus in MPa, got {self.E!r}"
+            )
         if self.nu is None and self.G is None:
             raise ValueError(f"Material '{self.name}' needs either nu or G")
+        if self.nu is not None and (not math.isfinite(self.nu) or self.nu <= -1.0):
+            # nu = -1 is the singularity of the isotropic relation below;
+            # anything past it gives a negative shear modulus.
+            raise ValueError(
+                f"Material '{self.name}': Poisson's ratio must be greater than -1, got {self.nu!r}"
+            )
+        if self.G is not None and (not math.isfinite(self.G) or self.G <= 0):
+            raise ValueError(
+                f"Material '{self.name}': G must be a positive finite modulus in MPa, got {self.G!r}"
+            )
+        for label, value in (
+            ("yield_strength", self.yield_strength),
+            ("ultimate_strength", self.ultimate_strength),
+            ("shear_strength", self.shear_strength),
+            ("density", self.density),
+        ):
+            if value is not None and (not math.isfinite(value) or value <= 0):
+                raise ValueError(
+                    f"Material '{self.name}': {label} must be positive and finite if given, got {value!r}"
+                )
         if self.G is None:
             self.G = self.E / (2.0 * (1.0 + self.nu))
         elif self.nu is None:
@@ -137,6 +183,83 @@ class SectionResult:
         return "\n".join(lines)
 
 
+def _validate_profile(
+    vertices: list[tuple[float, float]],
+    holes: list[list[tuple[float, float]]] | None,
+) -> None:
+    """Reject geometry the FE mesher cannot be trusted with, with a reason.
+
+    This is a hard prerequisite, not a nicety. `sectionproperties` meshes
+    through a C library that does not validate its input: handed a
+    self-intersecting outline, a zero-area profile, a NaN vertex or a
+    hairline sliver it variously hangs, allocates until the machine
+    swaps, or dies on a SIGBUS -- which in the server takes down the
+    whole process, not just the request. Two more cases return a number
+    that is silently WRONG rather than failing at all: a hole that isn't
+    inside the profile is quietly ignored (a 10x10 square with a stray
+    hole reports the full 100 mm^2), and two overlapping holes have their
+    overlap subtracted twice (400 - 36 - 36 rather than 400 - 63).
+
+    Each test below names the case it exists for. Note the deliberate
+    gap: a hole whose boundary TOUCHES the outer boundary is accepted
+    even though Shapely calls the result invalid, because `eat.dxf_io`
+    classifies holes with `covers` specifically so that a hole meeting
+    the profile wall still imports -- so a bare `polygon.is_valid` test
+    here would reject files that import correctly today.
+    """
+    if len(vertices) < 3:
+        raise ValueError("A polygon needs at least 3 vertices")
+    for hole in holes or []:
+        if len(hole) < 3:
+            raise ValueError("A hole needs at least 3 vertices")
+
+    rings = [("profile", vertices)] + [(f"hole {i + 1}", h) for i, h in enumerate(holes or [])]
+    for label, ring in rings:
+        for x, y in ring:
+            if not (math.isfinite(x) and math.isfinite(y)):
+                raise ValueError(
+                    f"The {label} has a vertex that isn't a finite number ({x}, {y}). "
+                    "Check the source drawing for a malformed coordinate."
+                )
+        # A ring that crosses itself (a bowtie, a figure-8, a doubled-back
+        # outline) has no well-defined interior to mesh.
+        if not LinearRing(ring).is_simple:
+            raise ValueError(
+                f"The {label} outline crosses itself. A profile has to be a single "
+                "simple closed loop — check for a stray vertex or a doubled-back edge."
+            )
+
+    shell = Polygon(vertices)
+    for i, hole in enumerate(holes or []):
+        hole_poly = Polygon(hole)
+        if not shell.covers(hole_poly):
+            raise ValueError(
+                f"Hole {i + 1} is not fully inside the profile, so it can't be "
+                "subtracted from it. Interior loops must be fully enclosed."
+            )
+        for j, other in enumerate((holes or [])[:i]):
+            if hole_poly.intersection(Polygon(other)).area > 0:
+                raise ValueError(
+                    f"Holes {j + 1} and {i + 1} overlap each other. Merge them into a "
+                    "single loop — overlapping holes would be subtracted twice."
+                )
+
+    polygon = Polygon(vertices, holes or None)
+    if polygon.area <= 0:
+        raise ValueError(
+            "The profile encloses no area — its outline is degenerate, or its holes "
+            "consume all of it."
+        )
+    minx, miny, maxx, maxy = polygon.bounds
+    span = math.hypot(maxx - minx, maxy - miny)
+    if span <= 0 or polygon.buffer(-span * MIN_INSCRIBED_SPAN_RATIO).is_empty:
+        raise ValueError(
+            f"The profile is a hairline sliver: no part of it is more than "
+            f"{2 * span * MIN_INSCRIBED_SPAN_RATIO:.3g} mm thick across a "
+            f"{span:.4g} mm span. Check the units and for near-duplicate vertices."
+        )
+
+
 def _build_geometry(
     vertices: list[tuple[float, float]],
     holes: list[list[tuple[float, float]]] | None = None,
@@ -146,17 +269,14 @@ def _build_geometry(
 
     Vertices (and each hole's vertices) should describe a single simple
     (non-self-intersecting) ring; the last point does not need to repeat
-    the first. `orient(..., sign=1.0)` normalises the exterior ring to
+    the first. `_validate_profile` enforces that and everything else the
+    mesher needs. `orient(..., sign=1.0)` normalises the exterior ring to
     counter-clockwise and every interior (hole) ring to clockwise, which
     is both what sectionproperties expects and the standard Shapely
     convention -- confirmed against a hand-calculable case (50x100mm
     rectangle minus a centered 20x20mm square hole) in verify_section.py.
     """
-    if len(vertices) < 3:
-        raise ValueError("A polygon needs at least 3 vertices")
-    for hole in holes or []:
-        if len(hole) < 3:
-            raise ValueError("A hole needs at least 3 vertices")
+    _validate_profile(vertices, holes)
     polygon = orient(Polygon(vertices, holes or None), sign=1.0)
     # Use the pure geometric default material (E=1, nu=0) so the raw
     # geometric getters (get_ic, get_j, ...) stay available; the caller's

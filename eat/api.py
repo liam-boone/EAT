@@ -156,8 +156,15 @@ def _resolve_material(material_name: str | None, material: MaterialSpec | None) 
             return get_material(material_name)
         except KeyError as exc:
             raise HTTPException(404, _error_message(exc)) from exc
+        except ValueError as exc:
+            # materials.json holds a record Material rejects (hand-edited,
+            # or written before the moduli were validated).
+            raise HTTPException(400, _error_message(exc)) from exc
     assert material is not None
-    return material.to_material()
+    try:
+        return material.to_material()
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 # --- Section models & endpoints ---------------------------------------------
@@ -463,7 +470,10 @@ def get_materials() -> list[MaterialResponse]:
 
 @app.post("/materials", response_model=MaterialResponse, status_code=201)
 def post_material(spec: MaterialSpec) -> MaterialResponse:
-    material = spec.to_material()
+    try:
+        material = spec.to_material()
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     try:
         add_material(material)
     except ValueError as exc:

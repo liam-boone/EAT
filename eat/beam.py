@@ -31,10 +31,19 @@ function (the superposition sum above) on a fine grid with a local
 quadratic refinement — a numerical *search* over an already-exact
 analytic function, not a numerical beam solver.
 
-Euler buckling load (Pcr = pi^2 * E * I_min / (K*L)^2, weak-axis I) is a
-column-capacity property independent of the transverse point loads above;
-a buckling safety factor is only meaningful against an axial compressive
-load, so `axial_load` is a separate, optional input.
+Euler buckling load (Pcr = pi^2 * E * I_min / (K*L)^2) is a column-capacity
+property independent of the transverse point loads above; a buckling safety
+factor is only meaningful against an axial compressive load, so `axial_load`
+is a separate, optional input. I_min is the least PRINCIPAL second moment of
+area, not min(Ixx, Iyy) -- see `_minimum_principal_i` for why the two differ
+on any profile whose centroidal axes aren't principal.
+
+Bending itself is treated as SYMMETRIC: stress is M / Z about the chosen
+centroidal axis. On a profile with a significant Ixy (an angle, a Z, or any
+profile drawn at an angle to the sketch axes) true unsymmetric-bending theory
+gives a higher peak stress and an out-of-plane deflection component that this
+does not model -- 35% higher stress on a 50x60x10 L-angle. Sections that are
+singly or doubly symmetric about a sketch axis (Ixy = 0) are exact.
 """
 
 from __future__ import annotations
@@ -275,6 +284,28 @@ _REACTION_LABELS = {
 }
 
 
+def _minimum_principal_i(section: SectionResult) -> float:
+    """The section's LEAST principal second moment of area, mm^4.
+
+    A column buckles about its weak PRINCIPAL axis, which is only the
+    weaker of Ixx/Iyy when the centroidal axes happen to be principal
+    (Ixy = 0) -- true for any singly or doubly symmetric profile, and
+    false for an angle, a Z, or any profile that simply isn't drawn
+    square to the sketch axes. Mohr's circle gives the principal values
+    exactly from the three centroidal moments:
+
+        I_1,2 = (Ixx + Iyy)/2 +/- sqrt( ((Ixx - Iyy)/2)^2 + Ixy^2 )
+
+    and the minus root is the weak axis. This reduces exactly to
+    min(Ixx, Iyy) when Ixy = 0, so symmetric sections are unaffected;
+    on a 50x60x10 L-angle min(Ixx, Iyy) overstates it by 1.92x, which
+    would have overstated Pcr by the same factor.
+    """
+    average = (section.ixx + section.iyy) / 2.0
+    radius = math.hypot((section.ixx - section.iyy) / 2.0, section.ixy)
+    return average - radius
+
+
 def _refine_extremum(x_grid: np.ndarray, y_grid: np.ndarray, v_of_x, L: float):
     """Refine a grid-located extremum with a local quadratic fit, then
     re-evaluate the exact function at the refined location."""
@@ -395,7 +426,7 @@ def analyze_beam(
     v_grid = total_v(x_grid)
     max_deflection_position, max_deflection = _refine_extremum(x_grid, v_grid, total_v, length)
 
-    I_min = min(section.ixx, section.iyy)
+    I_min = _minimum_principal_i(section)
     K = K_FACTOR[bc]
     euler_buckling_load = math.pi**2 * material.E * I_min / (K * length) ** 2
     buckling_safety_factor = (

@@ -26,6 +26,8 @@ the referenced material or section geometry is edited/deleted afterward.
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -33,6 +35,41 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_HISTORY_PATH = Path(__file__).parent / "history.json"
+
+
+def write_json_atomically(path: Path | str, text: str) -> None:
+    """Replace a file's contents in one step that cannot be half-done.
+
+    `Path.write_text` truncates first and writes after, so anything that
+    interrupts it -- and the README tells people to stop the server with
+    Ctrl+C -- leaves a truncated file behind. Every reader here then
+    raises JSONDecodeError, which surfaces as a bare HTTP 500 on
+    /history, /section, /beam and /baseline alike, with nothing in the UI
+    to say why or how to recover. The window is not theoretical: this
+    file reaches multiple megabytes after a few hundred runs.
+
+    Writing to a temp file in the same directory and then `os.replace`
+    (atomic on POSIX and on Windows) means a reader sees either the whole
+    old file or the whole new one, never a partial write. Shared by
+    eat.materials and eat.baseline, which have the same exposure.
+    """
+    path = Path(path)
+    directory = path.parent
+    directory.mkdir(parents=True, exist_ok=True)
+    handle, tmp_name = tempfile.mkstemp(dir=directory, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_name, path)
+    except BaseException:
+        # Never leave the stray temp file behind on a failed write.
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 Vertex = tuple[float, float]
 
@@ -78,8 +115,8 @@ def load_history(path: Path | str = DEFAULT_HISTORY_PATH) -> list[HistoryEntry]:
 
 
 def save_history(entries: list[HistoryEntry], path: Path | str = DEFAULT_HISTORY_PATH) -> None:
-    Path(path).write_text(
-        json.dumps([asdict(e) for e in entries], indent=2, ensure_ascii=False) + "\n"
+    write_json_atomically(
+        path, json.dumps([asdict(e) for e in entries], indent=2, ensure_ascii=False) + "\n"
     )
 
 

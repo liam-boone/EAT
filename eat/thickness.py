@@ -23,10 +23,14 @@ inside the material, so the moment the wall it sits in ends -- at a
 corner, at a rib junction, at the end of a leg -- the circle is cut off by
 the boundary that ends it. Formally the inscribed measure is always <= the
 ray measure and equals it exactly when the opposite face is parallel:
-against a planar opposite face at perpendicular distance d whose normal
-makes an angle T with the ray, the largest tangent circle has diameter
-2*d*cos(T)/(1 + cos(T)), which is d at T = 0 and falls away smoothly as
-the face slants. So it degrades gracefully where the ray cast blew up.
+against a planar opposite face that the ray reaches after distance d, and
+whose normal makes an angle T with that ray, the largest tangent circle
+has diameter 2*d*cos(T)/(1 + cos(T)), which is d at T = 0 and falls away
+smoothly as the face slants. So it degrades gracefully where the ray cast
+blew up. (Note d here is the distance ALONG THE RAY, which is what makes
+this directly comparable to the ray measure it is being contrasted with;
+in terms of the perpendicular distance p = d*cos(T) to the same face the
+identical result reads 2*p/(1 + cos(T)).)
 
 How it is computed
 ------------------

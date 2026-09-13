@@ -26,6 +26,11 @@ Also sanity-checks the Euler buckling effective-length factors (K = 0.5,
 fixed-pinned respectively) by confirming the resulting critical loads
 scale as 1/K^2 relative to the simply-supported (K=1) baseline, for a
 simple column with no point loads' worth of complexity beyond that ratio.
+Those ratios divide I out, so the ABSOLUTE Pcr is checked separately --
+once on a symmetric rectangle, and once on the asymmetric L-angle, where
+the weak axis is the principal I22 (108,333 mm^4 by hand) and NOT
+min(Ixx, Iyy) (208,333) -- a 1.92x difference in Pcr that a ratio test
+cannot see. See `run_principal_axis_buckling_checks`.
 
 Run with: python -m eat.verify_beam
 """
@@ -238,11 +243,98 @@ def run_buckling_checks() -> list[Check]:
         actual_ratio = pcr[bc] / baseline
         checks.append(Check(f"Pcr ratio vs simply-supported: {bc.value}", expected_ratio, actual_ratio, 1e-6))
 
+    # ABSOLUTE Pcr, not just the K ratio. The ratios above divide I out
+    # entirely, so on their own they say nothing about whether the right
+    # second moment of area went in. Rectangle: Iyy = 100*50^3/12 is the
+    # weak axis and Ixy = 0, so min(Ixx, Iyy) and the principal minimum
+    # coincide, and Pcr = pi^2 E I / L^2 is exact.
+    iyy_rect = 100.0 * 50.0**3 / 12.0
+    checks.append(
+        Check(
+            "Pcr absolute, symmetric rectangle (pi^2 E Iyy / L^2)",
+            math.pi**2 * MATERIAL.E * iyy_rect / L**2,
+            baseline,
+            1e-3,
+        )
+    )
+
+    return checks
+
+
+def run_principal_axis_buckling_checks() -> list[Check]:
+    """A column buckles about its weak PRINCIPAL axis, which is not
+    min(Ixx, Iyy) unless the centroidal axes are already principal.
+
+    The L-angle from `run_asymmetric_axis_checks` has Ixy != 0, so this is
+    a case where the two genuinely differ. Expected values come from the
+    same composite-rectangle hand calc used there, extended to the product
+    of area (Ixy_own = 0 for an axis-parallel rectangle, so each leg
+    contributes only its A*dx*dy parallel-axis term), then through Mohr's
+    circle -- all by hand, independent of what the code does:
+
+      R_a (vertical leg):   A=600, dx = 5-15 = -10, dy = 30-20 = +10
+      R_b (horizontal leg): A=400, dx = 30-15 = +15, dy = 5-20 = -15
+      Ixy = 600*(-10)(+10) + 400*(+15)(-15) = -60,000 - 90,000 = -150,000
+
+      I_1,2 = (Ixx+Iyy)/2 -/+ sqrt(((Ixx-Iyy)/2)^2 + Ixy^2)
+            = 270,833.33 -/+ sqrt(62,500^2 + 150,000^2)
+            = 270,833.33 -/+ 162,500
+      => I_22 (weak) = 108,333.33 mm^4, against min(Ixx, Iyy) = 208,333.33
+
+    So using min(Ixx, Iyy) would overstate Pcr by 1.923x here. The check
+    is on the ABSOLUTE Pcr, and it is written to fail if that happens.
+    """
+    vertices = [(0, 0), (50, 0), (50, 10), (10, 10), (10, 60), (0, 60)]
+    section = analyze_section(vertices, MATERIAL, mesh_size=0.5)
+    checks: list[Check] = []
+
+    ixy_exp = -150_000.0
+    i22_exp = 625_000 / 6 + 1_000_000 / 6 - 162_500.0  # = 108,333.33
+    i_min_naive = 625_000 / 3  # min(Ixx, Iyy) -- the WRONG answer
+
+    checks.append(Check("L-angle: Ixy (composite hand calc)", ixy_exp, section.ixy, 1e-3))
+
+    res = analyze_beam(
+        section, MATERIAL, L, BoundaryCondition.SIMPLY_SUPPORTED, [PointLoad(0.5, P)]
+    )
+    pcr_exp = math.pi**2 * MATERIAL.E * i22_exp / L**2
+    pcr_naive = math.pi**2 * MATERIAL.E * i_min_naive / L**2
+    checks += [
+        Check("L-angle: Pcr uses the weak PRINCIPAL axis I22", pcr_exp, res.euler_buckling_load, 2e-3),
+        # ...and is demonstrably NOT the min(Ixx, Iyy) answer, which is 1.92x higher
+        Check(
+            "L-angle: Pcr is not the min(Ixx,Iyy) value",
+            1.0,
+            1.0 if abs(res.euler_buckling_load - pcr_naive) / pcr_naive > 0.4 else 0.0,
+            1e-9,
+        ),
+    ]
+
+    # A doubly symmetric section must be completely unaffected by the
+    # principal-axis treatment: Ixy = 0 makes the two identical.
+    rect = analyze_section([(0, 0), (50, 0), (50, 100), (0, 100)], MATERIAL, mesh_size=1.0)
+    res_rect = analyze_beam(
+        rect, MATERIAL, L, BoundaryCondition.SIMPLY_SUPPORTED, [PointLoad(0.5, P)]
+    )
+    checks.append(
+        Check(
+            "Symmetric rectangle: principal I == min(Ixx, Iyy), Pcr unchanged",
+            math.pi**2 * MATERIAL.E * min(rect.ixx, rect.iyy) / L**2,
+            res_rect.euler_buckling_load,
+            1e-9,
+        )
+    )
+
     return checks
 
 
 def main() -> int:
-    checks = run_bc_checks() + run_asymmetric_axis_checks() + run_buckling_checks()
+    checks = (
+        run_bc_checks()
+        + run_asymmetric_axis_checks()
+        + run_buckling_checks()
+        + run_principal_axis_buckling_checks()
+    )
 
     width = max(len(c.label) for c in checks) + 2
     header = f"{'Check':<{width}}{'Expected':>18}{'Computed':>18}{'Rel. err':>12}  Status"

@@ -16,6 +16,12 @@ tolerance:
   well-known engineering approximation, not exact — hence the looser
   tolerance on that row).
 
+Then `run_input_guard_checks` covers the other half of correctness: geometry
+and materials that must be REFUSED rather than meshed. Those are not
+hypothetical edge cases — each one was observed hanging the process,
+crashing it outright, or returning a silently wrong number. See that
+function's docstring.
+
 Run with: python -m eat.verify_section
 """
 
@@ -107,6 +113,101 @@ def i_beam_hand_calc(d: float, bf: float, tf: float, tw: float) -> dict[str, flo
     return {"area": area, "ixx": ixx, "iyy": iyy, "j": j}
 
 
+def _rejects(fn) -> bool:
+    """True if `fn` raises a ValueError -- the exception eat.api turns into
+    a 400 with the message attached, rather than a 500."""
+    try:
+        fn()
+    except ValueError:
+        return True
+    except Exception:  # noqa: BLE001 -- anything else is exactly what we're guarding against
+        return False
+    return False
+
+
+def run_input_guard_checks() -> list[Check]:
+    """Geometry and materials that must be REFUSED, not meshed.
+
+    `sectionproperties` meshes through a C library that does not validate
+    its input. Every geometry case below was observed, before the guard in
+    `_validate_profile` existed, to hang the process, take it out with a
+    SIGBUS/SIGSEGV (which in the server kills the worker, not just the
+    request), or -- worse, because it is silent -- return a confidently
+    wrong number. The material cases returned an HTTP 500 with no message,
+    or propagated a zero/negative modulus into a negative Euler load and a
+    null deflection curve.
+
+    The ACCEPT half matters just as much: `eat.dxf_io` classifies holes
+    with `covers`, specifically so a hole whose boundary touches the outer
+    wall still imports, and Shapely calls that polygon invalid. A bare
+    `is_valid` guard here would reject files that import correctly, so the
+    guard tests rings, containment, overlap and area separately.
+    """
+    square = [(0, 0), (10, 0), (10, 10), (0, 10)]
+    must_reject = {
+        # was: SIGSEGV, process killed
+        "self-intersecting bowtie": lambda: analyze_section(
+            [(0, 0), (10, 10), (10, 0), (0, 10)], MATERIAL),
+        # was: SIGSEGV
+        "figure-8 (ring touches itself)": lambda: analyze_section(
+            [(0, 0), (10, 0), (10, 10), (0, 10), (0, 0), (-10, 0), (-10, -10), (0, -10)], MATERIAL),
+        # was: KeyError('triangles') -> HTTP 500
+        "three collinear points": lambda: analyze_section([(0, 0), (5, 0), (10, 0)], MATERIAL),
+        # was: hang, unbounded memory (7.6 GB observed before being killed)
+        "hairline sliver 100 x 0.001": lambda: analyze_section(
+            [(0, 0), (100, 0), (100, 0.001)], MATERIAL),
+        # was: SIGSEGV
+        "NaN vertex": lambda: analyze_section(
+            [(0, 0), (10, 0), (float("nan"), 10), (0, 10)], MATERIAL),
+        "infinite vertex": lambda: analyze_section(
+            [(0, 0), (10, 0), (float("inf"), 10), (0, 10)], MATERIAL),
+        # was: silently returned 100 mm^2, i.e. the hole simply ignored
+        "hole outside the profile": lambda: analyze_section(
+            square, MATERIAL, holes=[[(20, 20), (25, 20), (25, 25)]]),
+        # was: ZeroDivisionError -> HTTP 500
+        "hole larger than the profile": lambda: analyze_section(
+            square, MATERIAL, holes=[[(-5, -5), (15, -5), (15, 15), (-5, 15)]]),
+        # was: SIGSEGV
+        "hole identical to the profile": lambda: analyze_section(square, MATERIAL, holes=[square]),
+        # was: silently returned 364 mm^2 for a true 337 -- the overlap
+        # subtracted twice
+        "two overlapping holes": lambda: analyze_section(
+            [(0, 0), (20, 0), (20, 20), (0, 20)], MATERIAL,
+            holes=[[(2, 2), (8, 2), (8, 8), (2, 8)], [(5, 5), (11, 5), (11, 11), (5, 11)]]),
+        # materials: each was an HTTP 500 or a silently unphysical result
+        "material with E = 0": lambda: Material(name="zero", E=0, nu=0.3),
+        "material with negative E": lambda: Material(name="neg", E=-70000, nu=0.3),
+        "material with nu = -1 (G divides by zero)": lambda: Material(name="s", E=70000, nu=-1.0),
+        "material with negative yield strength": lambda: Material(
+            name="y", E=70000, nu=0.3, yield_strength=-100),
+    }
+    must_accept = {
+        "plain square": lambda: analyze_section(square, MATERIAL, mesh_size=1.0),
+        "duplicate consecutive vertices": lambda: analyze_section(
+            [(0, 0), (0, 0), (10, 0), (10, 0), (10, 10), (0, 10)], MATERIAL, mesh_size=1.0),
+        "clockwise winding": lambda: analyze_section(
+            [(0, 10), (10, 10), (10, 0), (0, 0)], MATERIAL, mesh_size=1.0),
+        # dxf_io uses `covers` so this imports; it must stay analyzable
+        "hole touching the outer wall": lambda: analyze_section(
+            square, MATERIAL, holes=[[(0, 2), (4, 2), (4, 4), (0, 4)]], mesh_size=0.2),
+        "thin-walled 200x200 tube, 0.8mm walls": lambda: analyze_section(
+            [(0, 0), (200, 0), (200, 200), (0, 200)], MATERIAL,
+            holes=[[(0.8, 0.8), (199.2, 0.8), (199.2, 199.2), (0.8, 199.2)]], mesh_size=20.0),
+    }
+
+    checks: list[Check] = []
+    for label, fn in must_reject.items():
+        checks.append(Check("Rejects", label[:22], 1.0, 1.0 if _rejects(fn) else 0.0, 1e-9))
+    for label, fn in must_accept.items():
+        ok = True
+        try:
+            fn()
+        except Exception:  # noqa: BLE001
+            ok = False
+        checks.append(Check("Accepts", label[:22], 1.0, 1.0 if ok else 0.0, 1e-9))
+    return checks
+
+
 def run() -> list[Check]:
     checks: list[Check] = []
 
@@ -180,9 +281,9 @@ def run() -> list[Check]:
 
 
 def main() -> int:
-    checks = run()
+    checks = run() + run_input_guard_checks()
 
-    header = f"{'Shape':<22}{'Qty':<6}{'Expected':>16}{'Computed':>16}{'Rel. err':>12}  Status"
+    header = f"{'Shape':<22}{'Qty':<24}{'Expected':>16}{'Computed':>16}{'Rel. err':>12}  Status"
     print(header)
     print("-" * len(header))
     all_passed = True
@@ -191,7 +292,7 @@ def main() -> int:
         if not c.passed:
             all_passed = False
         print(
-            f"{c.shape:<22}{c.quantity:<6}{c.expected:>16,.4f}{c.actual:>16,.4f}"
+            f"{c.shape:<22}{c.quantity:<24}{c.expected:>16,.4f}{c.actual:>16,.4f}"
             f"{c.rel_error * 100:>11.4f}%  {status}"
         )
 

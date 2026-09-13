@@ -29,7 +29,29 @@ import, medial-axis thickness, narrow-notch detection, local (plate)
 buckling, and the frontend layout/clarity sweep — backend and frontend
 both shipped, verified, committed, pushed to `origin/main`.
 
-No pending user request beyond this.
+A **full QA sweep** (accuracy / reliability / performance / cold-start
+onboarding) then ran over the whole project. It re-derived every core
+engineering claim by a method *different* from the one that originally
+verified it — an independent direct-stiffness FEM for the beam engine,
+exact Green's-theorem integrals for section properties, Rayleigh-Ritz
+energy minimisation for the plate-buckling coefficients, and bisection
+for the medial-axis thickness. Those four engines came back clean.
+
+Seven unambiguous bugs it *did* find are fixed and committed (F1–F7 in
+the commit message). The two worth carrying forward as knowledge:
+
+- **`min(Ixx, Iyy)` is not the weak axis.** It only coincides with the
+  least principal second moment when `Ixy = 0`. Euler buckling used it
+  and overstated Pcr by 1.92x on the project's own L-angle fixture. The
+  existing test missed it because it only compared Pcr *ratios* between
+  boundary conditions, which divides I out entirely. Any new check on a
+  section property needs at least one asymmetric fixture.
+- **`sectionproperties` meshes through a C library that does not
+  validate its input** — handed a self-intersecting ring, a NaN vertex or
+  a hairline sliver it segfaults or hangs rather than raising, and in the
+  server that kills the worker. `eat.section._validate_profile` is a hard
+  prerequisite, not a nicety; see its docstring for why it deliberately
+  is not a bare `polygon.is_valid` test.
 
 Two things from the frontend sweep worth knowing without re-reading the
 commit:
@@ -63,6 +85,9 @@ commit:
   runtime data; wipe from the History panel or delete the file if he
   wants it cleared. `eat/baseline.json` is at its correct default
   (`{"type": "builtin"}`).
+- `EAT-audit-sheet.html` in the project root — the QA sweep's findings
+  as a standalone page, written for Liam to read. Untracked on purpose;
+  delete it once read.
 
 ## Conventions (don't relitigate these)
 

@@ -58,7 +58,10 @@ def get_baseline_setting(path: Path | str = DEFAULT_BASELINE_SETTING_PATH) -> di
 
 
 def set_baseline_setting(setting: dict[str, Any], path: Path | str = DEFAULT_BASELINE_SETTING_PATH) -> None:
-    Path(path).write_text(json.dumps(setting, indent=2, ensure_ascii=False) + "\n")
+    """Atomically, so an interrupted write can't leave a file that makes
+    every subsequent baseline lookup raise. See
+    `eat.history.write_json_atomically`."""
+    history.write_json_atomically(path, json.dumps(setting, indent=2, ensure_ascii=False) + "\n")
 
 
 _builtin_cache: BaselineInfo | None = None

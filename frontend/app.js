@@ -606,7 +606,18 @@ materialSelect.addEventListener("change", () => {
    Section analysis
 ------------------------------------------------------------------ */
 
+// Monotonically increasing token guarding computeSection against an
+// out-of-order response, exactly as suggestionsRequestId does below. This
+// one matters more, because it is the token everything else hangs off:
+// a stale response here doesn't just render stale numbers, it also sets
+// state.sectionId and hands its stale profile to renderSectionResults,
+// which seeds the baseline, solid-fill and suggestion lookups in turn.
+let sectionRequestId = 0;
+
 function invalidateSection() {
+  // Also retires any /section request still in flight, so a response for
+  // the profile we just abandoned cannot re-open the panel behind us.
+  sectionRequestId += 1;
   state.sectionId = null;
   state.lastSectionResult = null;
   state.highlight = null;
@@ -618,8 +629,20 @@ function invalidateSection() {
   suggestionsSectionEl.hidden = true;
 }
 
+/** Analyzes the current profile + material, and renders the result.
+ *
+ * Not serialized by its callers: changing the material fires one of these
+ * while the previous one may still be in flight, and a real profile takes
+ * 1-3 seconds on the server. Without the token below, whichever response
+ * arrives LAST wins regardless of which was asked for last. Both halves of
+ * that were reproduced in the browser during review, with a held-back
+ * response: selecting ABS then 6061 left the dropdown reading 6061 while
+ * the panel showed ABS's numbers (EA 2.7e7 against 8.2e8 N, 12.3 against
+ * 32.0 kg/m); clearing a large profile and sketching a small one left the
+ * panel reporting the old 19,572 mm^2 next to a canvas showing 2,175. */
 async function computeSection() {
   if (!state.isClosed || state.points.length < 3 || !state.selectedMaterial) return;
+  const requestId = ++sectionRequestId;
   hideError();
   try {
     const body = await apiFetch("/section", {
@@ -631,12 +654,16 @@ async function computeSection() {
         material_name: state.selectedMaterial,
       }),
     });
+    if (requestId !== sectionRequestId) return; // a newer profile/material has since been requested
     state.sectionId = body.section_id;
     renderSectionResults(body);
     sectionResultsEl.hidden = false;
     beamInputsEl.hidden = false;
     beamResultsEl.hidden = true;
   } catch (err) {
+    // A superseded request that fails must not tear down the newer one's
+    // results, nor raise a banner about a profile no longer on screen.
+    if (requestId !== sectionRequestId) return;
     showError(`Section analysis failed: ${err.message}`);
     sectionResultsEl.hidden = true;
     beamInputsEl.hidden = true;

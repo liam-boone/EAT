@@ -434,6 +434,14 @@ def export_polygon_to_text(vertices: list[tuple[float, float]], layer: str = "EA
     touching disk -- used for the API's download endpoint."""
     if len(vertices) < 3:
         raise ValueError("A polygon needs at least 3 vertices")
+    # ezdxf will happily write "nan"/"inf" into the coordinate group codes,
+    # producing a file that no CAD tool (including this one's own importer)
+    # can read back. Fail here instead, where the reason is still visible.
+    for i, (x, y) in enumerate(vertices):
+        if not (math.isfinite(x) and math.isfinite(y)):
+            raise ValueError(
+                f"Vertex {i} is not a finite coordinate ({x}, {y}); it cannot be written to DXF."
+            )
 
     doc = ezdxf.new(dxfversion="R2010")
     doc.units = ezdxf_units.MM
