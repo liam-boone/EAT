@@ -68,6 +68,8 @@ const btnAnalyzeBeam = document.getElementById("btn-analyze-beam");
 
 const beamResultsEl = document.getElementById("beam-results");
 const beamSummaryGrid = document.getElementById("beam-summary-grid");
+const beamBucklingGrid = document.getElementById("beam-buckling-grid");
+const bucklingNoAxialEl = document.getElementById("buckling-no-axial");
 const localBucklingSectionEl = document.getElementById("local-buckling-section");
 const localBucklingTableEl = document.getElementById("local-buckling-table");
 const chartStressEl = document.getElementById("chart-stress");
@@ -82,16 +84,23 @@ const btnCloseHistory = document.getElementById("btn-close-history");
 const historyModal = document.getElementById("history-modal");
 const historyListEl = document.getElementById("history-list");
 const historyEmptyHint = document.getElementById("history-empty-hint");
+const historyBaselineNameEl = document.getElementById("history-baseline-name");
+const btnModalUseBuiltin = document.getElementById("btn-modal-use-builtin");
 
 const baselineSectionEl = document.getElementById("baseline-section");
 const baselineNameEl = document.getElementById("baseline-name");
+const topbarBaselineNameEl = document.getElementById("topbar-baseline-name");
+const btnTopbarBaseline = document.getElementById("btn-topbar-baseline");
+const btnChangeBaseline = document.getElementById("btn-change-baseline");
 const btnUseBuiltinBaseline = document.getElementById("btn-use-builtin-baseline");
 const baselineMetricsEl = document.getElementById("baseline-metrics");
 
 const suggestionsSectionEl = document.getElementById("suggestions-section");
-const suggestionListEl = document.getElementById("suggestion-list");
 const suggestionsCountEl = document.getElementById("suggestions-count");
-const suggestionsEmptyEl = document.getElementById("suggestions-empty");
+const dfmListEl = document.getElementById("dfm-list");
+const dfmEmptyEl = document.getElementById("dfm-empty");
+const structuralListEl = document.getElementById("structural-list");
+const structuralEmptyEl = document.getElementById("structural-empty");
 
 /* ------------------------------------------------------------------
    API helper — surfaces the API's own error text, never swallows it
@@ -268,14 +277,23 @@ function render() {
 }
 
 /** Draws whichever suggestion is currently hovered or pinned, on top of
- * the profile so it reads against the accent-coloured outline. */
+ * the profile so it reads against the accent-coloured outline. Painted in
+ * the finding's design-review category colour (the same two the cards use)
+ * rather than one shared warning colour, so the highlight still says which
+ * kind of finding it is once the eye is on the canvas. */
+const HIGHLIGHT_COLORS = {
+  dfm: { stroke: "#FFB84D", fill: "rgba(255, 184, 77, 0.25)" }, // --dfm / --warning
+  structural: { stroke: "#8FA6FF", fill: "rgba(143, 166, 255, 0.25)" }, // --structural
+};
+
 function drawSuggestionHighlight() {
   const highlight = state.highlight;
   if (!highlight) return;
 
+  const color = HIGHLIGHT_COLORS[highlight.category] || HIGHLIGHT_COLORS.dfm;
   ctx.save();
-  ctx.strokeStyle = "#FFB84D"; // --warning
-  ctx.fillStyle = "rgba(255, 184, 77, 0.25)";
+  ctx.strokeStyle = color.stroke;
+  ctx.fillStyle = color.fill;
   ctx.lineWidth = 2;
 
   (highlight.polylines || []).forEach((line) => {
@@ -626,14 +644,16 @@ async function computeSection() {
   }
 }
 
+/** The main view answers the two questions asked of every profile before
+ * anything else -- how much metal is in the section, and what a metre of
+ * it weighs. Everything else, the second moments included, is a follow-up
+ * question and lives under "More Info": it is all still one click away,
+ * and keeping the top of this panel to two lines is what lets the
+ * baseline comparison below it sit above the fold. */
 function renderSectionResults(r) {
   state.lastSectionResult = r;
   sectionResultGridPrimary.innerHTML = "";
   resultRow(sectionResultGridPrimary, "Area", fmtNum(r.area), "mm²");
-  resultRow(sectionResultGridPrimary, "Centroid", `${fmtNum(r.cx)}, ${fmtNum(r.cy)}`, "mm");
-  resultRow(sectionResultGridPrimary, "Ixx", fmtNum(r.ixx), "mm⁴");
-  resultRow(sectionResultGridPrimary, "Iyy", fmtNum(r.iyy), "mm⁴");
-  resultRow(sectionResultGridPrimary, "Izz", fmtNum(r.izz), "mm⁴");
   resultRow(
     sectionResultGridPrimary,
     "Mass Per Length",
@@ -642,6 +662,10 @@ function renderSectionResults(r) {
   );
 
   sectionResultGridSecondary.innerHTML = "";
+  resultRow(sectionResultGridSecondary, "Centroid", `${fmtNum(r.cx)}, ${fmtNum(r.cy)}`, "mm");
+  resultRow(sectionResultGridSecondary, "Ixx", fmtNum(r.ixx), "mm⁴");
+  resultRow(sectionResultGridSecondary, "Iyy", fmtNum(r.iyy), "mm⁴");
+  resultRow(sectionResultGridSecondary, "Izz", fmtNum(r.izz), "mm⁴");
   resultRow(sectionResultGridSecondary, "Ixy", fmtNum(r.ixy), "mm⁴");
   resultRow(sectionResultGridSecondary, "J (Torsion)", fmtNum(r.j), "mm⁴");
   resultRow(sectionResultGridSecondary, "Warping Iw", fmtNum(r.iw), "mm⁶");
@@ -690,7 +714,6 @@ function renderPdfImportInfo(r) {
     info.length_mm === null ? "not found" : fmtNum(info.length_mm),
     info.length_mm === null ? "" : "mm"
   );
-  resultRow(pdfImportGridEl, "Length Source", info.length_source, "");
 
   const checks = info.dimension_checks || [];
   const agreed = checks.filter((c) => c.agrees).length;
@@ -754,7 +777,8 @@ async function refreshSuggestions(r) {
   const requestId = ++suggestionsRequestId;
   state.highlight = null;
   state.pinnedSuggestion = null;
-  suggestionListEl.innerHTML = "";
+  dfmListEl.innerHTML = "";
+  structuralListEl.innerHTML = "";
   try {
     const found = await apiFetch("/suggestions", {
       method: "POST",
@@ -762,12 +786,23 @@ async function refreshSuggestions(r) {
       body: JSON.stringify({ section: { vertices: r.vertices, holes: r.holes || [] } }),
     });
     if (requestId !== suggestionsRequestId) return; // a newer profile has since been requested
-    suggestionsCountEl.textContent = found.length ? `${found.length}` : "none";
-    suggestionsEmptyEl.hidden = found.length > 0;
-    suggestionListEl.innerHTML = "";
+    suggestionsCountEl.textContent = found.length ? `${found.length} finding${found.length === 1 ? "" : "s"}` : "nothing flagged";
+    dfmListEl.innerHTML = "";
+    structuralListEl.innerHTML = "";
+    let dfmCount = 0;
+    let structuralCount = 0;
+    // Index is the whole list's index, not the category's: it keys the
+    // pinned-highlight state, which is global across both lists (only one
+    // finding is ever drawn on the canvas at a time).
     found.forEach((suggestion, index) => {
-      suggestionListEl.appendChild(renderSuggestion(suggestion, index));
+      const category = suggestionCategory(suggestion.kind);
+      const list = category === "dfm" ? dfmListEl : structuralListEl;
+      list.appendChild(renderSuggestion(suggestion, index, category));
+      if (category === "dfm") dfmCount++;
+      else structuralCount++;
     });
+    dfmEmptyEl.hidden = dfmCount > 0;
+    structuralEmptyEl.hidden = structuralCount > 0;
     suggestionsSectionEl.hidden = false;
   } catch (err) {
     if (requestId !== suggestionsRequestId) return;
@@ -775,10 +810,45 @@ async function refreshSuggestions(r) {
   }
 }
 
-function renderSuggestion(suggestion, index) {
+/** Which of the two design-review columns a finding belongs in.
+ *
+ * The split is by what you do about it, not by what physics the check
+ * used. DFM findings are answered by changing the drawing so the die can
+ * make the part -- wall thickness in both directions, unfilleted internal
+ * corners (a die tongue that chips), and notches that leave less than a
+ * manufacturable wall. Structural findings are answered by moving
+ * material: the section is more lopsided than its envelope requires, or
+ * mass is sitting on the neutral axis earning nothing.
+ *
+ * Sharp corners are a stress riser *and* a die-life problem; they sit
+ * under DFM because the fix ("put a 0.5-1mm radius on it") is a
+ * manufacturing change either way. Buckling -- Euler and per-wall plate
+ * both -- is deliberately NOT here: it needs a length and a load case, so
+ * it is reported in Beam Results, and the Structural column says so
+ * rather than leaving the reader to wonder where it went.
+ *
+ * An unrecognised kind (a check added to eat.suggestions without this
+ * list being updated) falls to DFM, which is where the manufacturing-
+ * critical checks live and therefore the safer default -- it shows up
+ * misfiled rather than not at all. */
+const SUGGESTION_CATEGORIES = {
+  thin_wall: "dfm",
+  thick_wall: "dfm",
+  narrow_notch: "dfm",
+  sharp_corner: "dfm",
+  material_distribution: "structural",
+  core_material: "structural",
+};
+
+function suggestionCategory(kind) {
+  return SUGGESTION_CATEGORIES[kind] || "dfm";
+}
+
+function renderSuggestion(suggestion, index, category) {
   const li = document.createElement("li");
-  li.className = "suggestion";
+  li.className = `suggestion suggestion--${category}`;
   li.dataset.index = String(index);
+  li.dataset.category = category;
 
   const title = document.createElement("div");
   title.className = "suggestion__title";
@@ -800,8 +870,13 @@ function renderSuggestion(suggestion, index) {
     li.appendChild(where);
   }
 
+  // The canvas highlight is drawn in the finding's own category colour, so
+  // a highlighted feature stays identifiable as DFM or Structural once the
+  // eye has left the card that triggered it.
+  const highlight = { ...suggestion, category };
+
   const show = () => {
-    state.highlight = suggestion;
+    state.highlight = highlight;
     render();
   };
   const clear = () => {
@@ -816,7 +891,9 @@ function renderSuggestion(suggestion, index) {
   li.addEventListener("mouseleave", clear);
   li.addEventListener("click", () => {
     const alreadyPinned = state.pinnedSuggestion === index;
-    suggestionListEl
+    // Pinning is global across both category lists -- only one finding is
+    // ever drawn on the canvas -- so clear the pin from either of them.
+    suggestionsSectionEl
       .querySelectorAll(".suggestion--pinned")
       .forEach((el) => el.classList.remove("suggestion--pinned"));
     if (alreadyPinned) {
@@ -825,7 +902,7 @@ function renderSuggestion(suggestion, index) {
     } else {
       state.pinnedSuggestion = index;
       li.classList.add("suggestion--pinned");
-      state.highlight = suggestion;
+      state.highlight = highlight;
     }
     render();
   });
@@ -1145,6 +1222,11 @@ btnAnalyzeBeam.addEventListener("click", async () => {
     });
     renderBeamResults(body);
     beamResultsEl.hidden = false;
+    // The results panel is full-width below both columns, so on a 16:9
+    // screen it is reliably off-screen from where this button sits at the
+    // bottom of the right-hand column -- without this the click looks like
+    // it did nothing.
+    beamResultsEl.scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (err) {
     showError(`Beam analysis failed: ${err.message}`);
     beamResultsEl.hidden = true;
@@ -1173,6 +1255,17 @@ function summaryTile(grid, label, value, unit, opts = {}) {
   grid.appendChild(wrap);
 }
 
+/** Two groups, not one strip of tiles.
+ *
+ * Everything the point loads cause -- moment, bending stress, its safety
+ * factor, deflection, the support reactions, and the two diagrams that
+ * plot exactly those -- goes in the first. Everything about stability
+ * under the axial load -- the Euler column result and the per-wall plate
+ * table -- goes in the second. They are separate failure modes answering
+ * separate questions, and a single undifferentiated grid let the eye read
+ * "Safety Factor" and "Buckling Safety Factor" as two readings of one
+ * verdict when they are not: a beam can pass one and fail the other, which
+ * is the whole reason both are computed. */
 function renderBeamResults(r) {
   beamSummaryGrid.innerHTML = "";
   summaryTile(
@@ -1186,7 +1279,7 @@ function renderBeamResults(r) {
   summaryTile(beamSummaryGrid, "Max Bending Stress", `${fmtNum(r.max_bending_stress)} MPa`);
   summaryTile(
     beamSummaryGrid,
-    "Safety Factor",
+    "Bending Safety Factor",
     r.safety_factor === null ? "n/a" : fmtNum(r.safety_factor, { digits: 2 }),
     "",
     { highlight: true, className: safetyFactorClass(r.safety_factor) }
@@ -1194,16 +1287,6 @@ function renderBeamResults(r) {
   summaryTile(beamSummaryGrid, "Max Deflection", `${fmtNum(r.max_deflection, { digits: 4 })} mm`, "", {
     sub: `@ ${fmtNum(r.max_deflection_position)}mm`,
   });
-  summaryTile(beamSummaryGrid, "Euler Buckling Load", `${fmtNum(r.euler_buckling_load)} N  (K=${r.effective_length_factor})`);
-  if (r.buckling_safety_factor !== null) {
-    summaryTile(
-      beamSummaryGrid,
-      "Buckling Safety Factor",
-      fmtNum(r.buckling_safety_factor, { digits: 2 }),
-      "",
-      { className: safetyFactorClass(r.buckling_safety_factor) }
-    );
-  }
   r.reactions.forEach((reaction) => {
     summaryTile(
       beamSummaryGrid,
@@ -1211,6 +1294,21 @@ function renderBeamResults(r) {
       `${fmtNum(reaction.force)} N, ${fmtNum(reaction.moment)} N·mm`
     );
   });
+
+  beamBucklingGrid.innerHTML = "";
+  summaryTile(beamBucklingGrid, "Euler Buckling Load", `${fmtNum(r.euler_buckling_load)} N`, "", {
+    sub: `K=${r.effective_length_factor} (whole column)`,
+  });
+  if (r.buckling_safety_factor !== null) {
+    summaryTile(
+      beamBucklingGrid,
+      "Euler Safety Factor",
+      fmtNum(r.buckling_safety_factor, { digits: 2 }),
+      "",
+      { highlight: true, className: safetyFactorClass(r.buckling_safety_factor) }
+    );
+  }
+  bucklingNoAxialEl.hidden = r.buckling_safety_factor !== null;
 
   renderLocalBuckling(r.local_buckling);
 
@@ -1432,6 +1530,8 @@ async function openHistory() {
       apiFetch("/baseline").catch(() => null), // best-effort: still show the list if this fails
     ]);
     const currentBaselineEntryId = currentBaseline ? currentBaseline.history_entry_id : null;
+    if (currentBaseline) setBaselineName(currentBaseline.name);
+    btnModalUseBuiltin.disabled = !currentBaseline || currentBaseline.source === "builtin";
     if (entries.length === 0) {
       historyEmptyHint.hidden = false;
       return;
@@ -1504,13 +1604,8 @@ function renderHistoryRow(summary, isCurrentBaseline) {
   baselineBtn.addEventListener("click", async (ev) => {
     ev.stopPropagation();
     try {
-      await apiFetch("/baseline", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type: "history", entry_id: summary.id }),
-      });
+      await applyBaseline({ type: "history", entry_id: summary.id });
       await openHistory(); // re-render the list so the "baseline" tag moves
-      refreshBaselineComparison(state.lastSectionResult);
     } catch (err) {
       showError(`Could not set baseline: ${err.message}`);
     }
@@ -1618,12 +1713,43 @@ function zWorst(plus, minus) {
   return Math.min(plus, minus);
 }
 
+/* Specific-stiffness / specific-strength unit reductions.
+ *
+ * Each metric is (something in the engine's mm-N-MPa system) divided by a
+ * mass per length in kg/m, which lands on a unit with a fraction inside a
+ * fraction -- N/(kg/m), N·mm²/(kg/m). Those are the same quantity as the
+ * plain SI forms below, so the displayed value is scaled once here and
+ * labelled with the simple unit rather than the compound one:
+ *
+ *   EA/μ        N/(kg/m)      = N·m/kg   -> MN·m/kg  (E/ρ, "specific stiffness")
+ *   EI/μ        N·mm²/(kg/m)  = N·m³/kg  (mm² = 1e-6 m²)
+ *   σy·A/μ      N/(kg/m)      = N·m/kg   -> kN·m/kg  (σy/ρ, "specific strength")
+ *   σy·Z/μ      N·mm/(kg/m)   = N·m²/kg  (mm = 1e-3 m)
+ *
+ * The prefixes (M, k) are chosen to keep aluminium extrusions in a
+ * readable range rather than in exponent notation. Scaling is applied to
+ * profile and baseline alike, so the bar lengths are unchanged. */
+const SPECIFIC_STIFFNESS_AXIAL_SCALE = 1e-6; // N/(kg/m) -> MN·m/kg
+const SPECIFIC_STIFFNESS_BENDING_SCALE = 1e-6; // N·mm²/(kg/m) -> N·m³/kg
+const SPECIFIC_STRENGTH_AXIAL_SCALE = 1e-3; // N/(kg/m) -> kN·m/kg
+const SPECIFIC_STRENGTH_BENDING_SCALE = 1e-3; // N·mm/(kg/m) -> N·m²/kg
+
 /** Builds the six stiffness/strength-to-weight metrics (plus mass per
  * length) comparing `sectionResult`/`material` against baseline response
  * `b`. Strength metrics need a yield strength on *both* sides; skipped
  * (not shown with a placeholder) when either is missing, since there's
  * nothing meaningful to compare otherwise. Grouped to match the section
- * headings in the UI. */
+ * headings in the UI.
+ *
+ * Two of the six carry a `note`, and exactly two: the axial rows cancel
+ * their geometry algebraically (EA/μ = E·A/(ρ·A) = E/ρ, and σy·A/μ =
+ * σy/ρ), so they are pure material properties and read identically for
+ * every profile in the same alloy. That is the correct answer, not a
+ * broken comparison, but it looks like one unexplained -- so it is
+ * explained on the row itself. The bending rows keep an I or a Z that does
+ * *not* cancel, so they are genuinely geometry-dependent and get no note;
+ * mass per length (ρ·A) keeps its area too. eat/verify_baseline.py checks
+ * the same reduction algebraically on the backend side. */
 function buildBaselineMetricGroups(sectionResult, material, b) {
   const groups = [];
   const massKnown = sectionResult.mass_per_length !== null && b.mass_per_length !== null;
@@ -1648,21 +1774,25 @@ function buildBaselineMetricGroups(sectionResult, material, b) {
       metrics: [
         {
           label: "Axial",
-          unit: "N/(kg/m)",
-          profile: sectionResult.ea / sectionResult.mass_per_length,
-          baseline: b.ea / b.mass_per_length,
+          unit: "MN·m/kg",
+          note:
+            "Material property only: EA ÷ mass per length cancels the area, leaving E ÷ density. " +
+            "Every profile in this material reads the same here by definition — geometry shows up " +
+            "in the bending rows below, not this one.",
+          profile: (sectionResult.ea / sectionResult.mass_per_length) * SPECIFIC_STIFFNESS_AXIAL_SCALE,
+          baseline: (b.ea / b.mass_per_length) * SPECIFIC_STIFFNESS_AXIAL_SCALE,
         },
         {
           label: "Bending (X)",
-          unit: "N·mm²/(kg/m)",
-          profile: sectionResult.ei_yy / sectionResult.mass_per_length,
-          baseline: b.ei_yy / b.mass_per_length,
+          unit: "N·m³/kg",
+          profile: (sectionResult.ei_yy / sectionResult.mass_per_length) * SPECIFIC_STIFFNESS_BENDING_SCALE,
+          baseline: (b.ei_yy / b.mass_per_length) * SPECIFIC_STIFFNESS_BENDING_SCALE,
         },
         {
           label: "Bending (Y)",
-          unit: "N·mm²/(kg/m)",
-          profile: sectionResult.ei_xx / sectionResult.mass_per_length,
-          baseline: b.ei_xx / b.mass_per_length,
+          unit: "N·m³/kg",
+          profile: (sectionResult.ei_xx / sectionResult.mass_per_length) * SPECIFIC_STIFFNESS_BENDING_SCALE,
+          baseline: (b.ei_xx / b.mass_per_length) * SPECIFIC_STIFFNESS_BENDING_SCALE,
         },
       ],
     });
@@ -1686,21 +1816,33 @@ function buildBaselineMetricGroups(sectionResult, material, b) {
       metrics: [
         {
           label: "Axial",
-          unit: "N/(kg/m)",
-          profile: (yieldStrength * sectionResult.area) / sectionResult.mass_per_length,
-          baseline: (b.yield_strength * b.area) / b.mass_per_length,
+          unit: "kN·m/kg",
+          note:
+            "Material property only: yield × area ÷ mass per length cancels the area, leaving " +
+            "yield ÷ density. Every profile in this material reads the same here by definition — " +
+            "geometry shows up in the bending rows below, not this one.",
+          profile:
+            ((yieldStrength * sectionResult.area) / sectionResult.mass_per_length) *
+            SPECIFIC_STRENGTH_AXIAL_SCALE,
+          baseline: ((b.yield_strength * b.area) / b.mass_per_length) * SPECIFIC_STRENGTH_AXIAL_SCALE,
         },
         {
           label: "Bending (X)",
-          unit: "N·mm/(kg/m)",
-          profile: (yieldStrength * zWorstYyProfile) / sectionResult.mass_per_length,
-          baseline: (b.yield_strength * zWorstYyBaseline) / b.mass_per_length,
+          unit: "N·m²/kg",
+          profile:
+            ((yieldStrength * zWorstYyProfile) / sectionResult.mass_per_length) *
+            SPECIFIC_STRENGTH_BENDING_SCALE,
+          baseline:
+            ((b.yield_strength * zWorstYyBaseline) / b.mass_per_length) * SPECIFIC_STRENGTH_BENDING_SCALE,
         },
         {
           label: "Bending (Y)",
-          unit: "N·mm/(kg/m)",
-          profile: (yieldStrength * zWorstXxProfile) / sectionResult.mass_per_length,
-          baseline: (b.yield_strength * zWorstXxBaseline) / b.mass_per_length,
+          unit: "N·m²/kg",
+          profile:
+            ((yieldStrength * zWorstXxProfile) / sectionResult.mass_per_length) *
+            SPECIFIC_STRENGTH_BENDING_SCALE,
+          baseline:
+            ((b.yield_strength * zWorstXxBaseline) / b.mass_per_length) * SPECIFIC_STRENGTH_BENDING_SCALE,
         },
       ],
     });
@@ -1726,6 +1868,13 @@ function renderBaselineMetric(metric) {
   const barMax = Math.max(metric.profile, metric.baseline, Number.MIN_VALUE);
   wrap.appendChild(baselineMetricRow("Profile", metric.profile, barMax, metric.unit, "profile"));
   wrap.appendChild(baselineMetricRow("Baseline", metric.baseline, barMax, metric.unit, "baseline"));
+
+  if (metric.note) {
+    const note = document.createElement("p");
+    note.className = "baseline-metric__note";
+    note.textContent = metric.note;
+    wrap.appendChild(note);
+  }
   return wrap;
 }
 
@@ -1768,6 +1917,30 @@ function renderBaselineMetrics(groups) {
   });
 }
 
+/** The baseline gets switched often, so it is reachable from three places
+ * rather than one: the topbar (always visible, and doubles as the readout
+ * of what's currently selected), the comparison panel, and the History
+ * modal that actually lists the candidates. All three show the same name
+ * and offer the same operations -- "Change…" and the topbar button both
+ * open the modal, and both the panel and the modal can reset to built-in
+ * -- so no entry point is a subset of another. This keeps them in step. */
+function setBaselineName(name) {
+  baselineNameEl.textContent = name;
+  topbarBaselineNameEl.textContent = name;
+  historyBaselineNameEl.textContent = name;
+}
+
+async function refreshBaselineName() {
+  try {
+    const b = await apiFetch("/baseline");
+    setBaselineName(b.name);
+    return b;
+  } catch (err) {
+    setBaselineName("unavailable");
+    return null;
+  }
+}
+
 /** Refreshes the "Compared to Baseline" section for whatever's currently
  * displayed. Always a fresh, live lookup against the current baseline
  * setting and the currently-selected material -- like the solid-fill
@@ -1777,11 +1950,12 @@ function renderBaselineMetrics(groups) {
 async function refreshBaselineComparison(sectionResult) {
   if (!sectionResult) {
     baselineSectionEl.hidden = true;
+    refreshBaselineName(); // the topbar readout is independent of any loaded profile
     return;
   }
   try {
     const b = await apiFetch("/baseline");
-    baselineNameEl.textContent = b.name;
+    setBaselineName(b.name);
     const material = state.materials.find((m) => m.name === state.selectedMaterial) || null;
     renderBaselineMetrics(buildBaselineMetricGroups(sectionResult, material, b));
     baselineSectionEl.hidden = false;
@@ -1790,18 +1964,35 @@ async function refreshBaselineComparison(sectionResult) {
   }
 }
 
-btnUseBuiltinBaseline.addEventListener("click", async () => {
+/** Single path for every baseline change, whichever control triggered it,
+ * so all three readouts and the comparison land in the same state. */
+async function applyBaseline(setting) {
+  await apiFetch("/baseline", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(setting),
+  });
+  await refreshBaselineName();
+  refreshBaselineComparison(state.lastSectionResult);
+}
+
+async function useBuiltinBaseline() {
   try {
-    await apiFetch("/baseline", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "builtin" }),
-    });
-    refreshBaselineComparison(state.lastSectionResult);
+    await applyBaseline({ type: "builtin" });
   } catch (err) {
     showError(`Could not reset baseline: ${err.message}`);
   }
+}
+
+btnUseBuiltinBaseline.addEventListener("click", useBuiltinBaseline);
+
+btnModalUseBuiltin.addEventListener("click", async () => {
+  await useBuiltinBaseline();
+  openHistory(); // re-render the list so the "baseline" tag clears
 });
+
+btnChangeBaseline.addEventListener("click", openHistory);
+btnTopbarBaseline.addEventListener("click", openHistory);
 
 /* ------------------------------------------------------------------
    Init
@@ -1810,6 +2001,7 @@ btnUseBuiltinBaseline.addEventListener("click", async () => {
 renderPointLoads();
 updateToolbarState();
 loadMaterials();
+refreshBaselineName(); // topbar readout is meaningful before any profile is loaded
 layoutCanvas();
 
 let resizeTimeout;

@@ -26,6 +26,13 @@
   /* Semantic */
   --warning: #FFB84D;
   --danger: #FF6B5E;
+  /* Design-review categories. DFM keeps the amber the suggestion list has
+     always used (it is the "this may not make" warning); Structural gets
+     its own periwinkle so the two categories are separable at a glance
+     without either borrowing the lime accent, which stays reserved for
+     confirmed geometry and the one key result. */
+  --dfm: var(--warning);
+  --structural: #8FA6FF;
 
   /* Type */
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -122,6 +129,45 @@ button, input, select {
   color: var(--text-secondary);
 }
 
+.topbar__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.topbar__divider {
+  width: 1px;
+  align-self: stretch;
+  margin: var(--space-1) var(--space-1);
+  background: var(--border-subtle);
+}
+
+/* Always-visible baseline readout/switcher. Doubles as a label, so what
+   the comparison is currently against is answerable without scrolling to
+   (or even having) the comparison panel. */
+.topbar__baseline {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  max-width: 280px;
+}
+
+.topbar__baseline-label {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+.topbar__baseline-name {
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* --- Error banner --------------------------------------------------- */
 
 .error-banner {
@@ -209,6 +255,30 @@ button, input, select {
 
 .modal__close:hover {
   color: var(--text-primary);
+}
+
+/* The history list is also the baseline picker, so the modal states which
+   baseline is active and offers the same reset the comparison panel does
+   -- two entry points, one set of operations. */
+.modal__toolbar {
+  padding: var(--space-3) var(--space-5);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface-sunken);
+  flex-shrink: 0;
+}
+
+.modal__toolbar .baseline-indicator {
+  margin-bottom: 0;
+}
+
+.modal__toolbar-hint {
+  margin-top: var(--space-2);
+  font-size: var(--text-xs);
+}
+
+.modal__toolbar-hint strong {
+  color: var(--text-primary);
+  font-weight: 600;
 }
 
 .modal__body {
@@ -308,18 +378,53 @@ button, input, select {
   border-color: var(--danger);
 }
 
-/* --- Layout ---------------------------------------------------------- */
+/* --- Layout ----------------------------------------------------------
+
+   Tuned against 16:9 / 16:10 viewports (1920x1080, 1536x864, 1440x900),
+   where vertical space is the scarce resource, not horizontal. Two things
+   follow from that:
+
+   * The canvas is locked to 4:3 by `layoutCanvas()`, so the left column's
+     *width* sets the sketch panel's height. Past ~1500px the column is
+     capped (--canvas-max) rather than allowed to keep growing, which on a
+     1080p screen is the difference between the sketch filling the fold and
+     leaving room for the results beside it.
+   * Whatever the canvas doesn't use below it is real estate, not padding:
+     the design-review panel lives there (`.layout__main` stacks them), so
+     the left column's height tracks the right column's instead of
+     terminating in ~500px of empty navy.
+------------------------------------------------------------------------ */
 
 .layout {
+  --canvas-max: 880px; /* past this the sketch stops growing and the results get the width */
   display: grid;
-  grid-template-columns: minmax(0, 1.3fr) minmax(320px, 0.9fr);
+  grid-template-columns: minmax(0, 1.15fr) minmax(340px, 1fr);
   gap: var(--space-5);
   padding: var(--space-5) var(--space-6);
   align-items: start;
 }
 
+/* Sketch + design review: one column, so findings sit under the profile
+   they point at and fill the space a 4:3 canvas leaves below itself. */
+.layout__main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  min-width: 0;
+}
+
 .panel--beam-results {
   grid-column: 1 / -1;
+}
+
+/* Wide desktops (1600px+): cap the sketch column so a 4:3 canvas stops
+   eating vertical space it has no use for, and hand the surplus width to
+   the dense numeric column, where the baseline bars and their long unit
+   labels actually benefit from it. */
+@media (min-width: 1600px) {
+  .layout {
+    grid-template-columns: minmax(0, var(--canvas-max)) minmax(0, 1fr);
+  }
 }
 
 @media (max-width: 860px) {
@@ -583,7 +688,11 @@ button, input, select {
   text-align: right;
 }
 
-.result-grid dd.unit {
+/* `resultRow()` puts the unit in a <span class="unit"> *inside* the <dd>,
+   so the descendant selector is the one that matches; `dd.unit` alone
+   never did, which left units rendering at full size and hard against the
+   digits ("850mm²"). */
+.result-grid dd .unit {
   color: var(--text-secondary);
   font-size: var(--text-xs);
   margin-left: var(--space-1);
@@ -593,6 +702,18 @@ button, input, select {
   color: var(--accent);
   font-size: var(--text-xl);
   font-weight: 700;
+}
+
+/* A headline tile that is *also* a safety factor must take its colour from
+   the safety factor, not from being a headline: `.result-grid dd.highlight`
+   otherwise out-specifies the bare `.sf-*` classes below and paints a
+   failing (<1) safety factor in the safe accent green. */
+.result-grid dd.highlight.sf-danger {
+  color: var(--danger);
+}
+
+.result-grid dd.highlight.sf-warning {
+  color: var(--warning);
 }
 
 /* Safety-factor thresholds: <1 fails, <1.5 marginal, else safe (accent).
@@ -610,8 +731,13 @@ button, input, select {
   color: var(--accent);
 }
 
+/* auto-FILL, not auto-fit: a group with only two tiles (the Buckling one)
+   would otherwise stretch them across the whole panel, stranding each
+   label at the far left of a 600px-wide cell and its value at the far
+   right. Filling the row with empty tracks keeps every tile the same
+   ~200px whether the group holds two of them or eight. */
 .result-grid--summary {
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
   grid-auto-flow: row;
   display: grid;
   gap: var(--space-4);
@@ -622,6 +748,14 @@ button, input, select {
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
+}
+
+/* A tile is a label with its value under it -- both flush left. The
+   right-alignment `.result-grid dd` uses is for the two-column
+   label/value lists, where it puts the digits in a column. */
+.result-grid--summary dd,
+.result-grid--summary dd.highlight {
+  text-align: left;
 }
 
 .result-grid--summary dt {
@@ -643,6 +777,46 @@ button, input, select {
   font-size: var(--text-xs);
   color: var(--text-secondary);
   font-variant-numeric: tabular-nums;
+}
+
+/* --- Beam result groups -------------------------------------------------
+
+   "What do the point loads do to it" and "does it stay stable under the
+   axial load" are separate questions with separate answers; each gets its
+   own sunken card so no tile can be read as belonging to the other. The
+   charts live inside the applied-loads card because that is what they plot.
+------------------------------------------------------------------------ */
+
+.beam-group {
+  background: var(--surface-sunken);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: var(--space-4) var(--space-5) var(--space-5);
+  margin-bottom: var(--space-5);
+}
+
+.beam-group:last-of-type {
+  margin-bottom: 0;
+}
+
+.beam-group__title {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-primary);
+  margin-bottom: var(--space-4);
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+/* The summary grid carries its own bottom margin for the charts that
+   follow it; inside a card that would double up on the padding. */
+.beam-group .result-grid--summary:last-child {
+  margin-bottom: 0;
 }
 
 /* --- Collapsible "More Info" section --------------------------------- */
@@ -787,7 +961,96 @@ button, input, select {
   text-align: right;
 }
 
-/* --- Suggestions -------------------------------------------------------- */
+/* Metrics that algebraically reduce to a pure material property (see
+   buildBaselineMetricGroups) carry a note saying so, because two
+   different profiles in the same alloy reading identically here is the
+   correct answer and otherwise looks like a broken comparison. */
+.baseline-metric__note {
+  margin: 2px 0 0;
+  font-size: 10px;
+  line-height: 1.45;
+  color: var(--text-tertiary);
+}
+
+.baseline-metric__note code {
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+}
+
+/* --- Design review (DFM / Structural suggestions) ------------------------
+
+   Two categories, deliberately given different visual identities rather
+   than just different headings: a DFM finding is acted on by changing the
+   drawing so the die can make it, a Structural one by moving material
+   around. Colour (amber vs. periwinkle) carries the distinction on every
+   card, so a finding stays categorised when read on its own.
+------------------------------------------------------------------------ */
+
+/* Side by side whenever each category still gets a readable measure for
+   its detail text, stacked otherwise. auto-fit on a 320px floor makes that
+   decision from the column's actual width rather than the viewport's,
+   which is what matters here -- this panel's width is set by the sketch
+   column's cap, not by the window. 320 rather than 340 so a 1440x900
+   laptop (the narrowest 16:10 target, where the sketch column lands at
+   ~720px) clears the two-column threshold with room to spare instead of
+   flipping on a few pixels of scrollbar. */
+.review-groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: var(--space-5);
+  align-items: start;
+}
+
+.review-group {
+  min-width: 0;
+  padding-left: var(--space-3);
+  border-left: 1px solid var(--border-subtle);
+}
+
+.review-group__title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-primary);
+  margin-bottom: var(--space-1);
+}
+
+.review-group__swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 1px;
+  flex-shrink: 0;
+}
+
+.review-group--dfm .review-group__swatch {
+  background: var(--dfm);
+}
+
+.review-group--structural .review-group__swatch {
+  background: var(--structural);
+}
+
+.review-group__empty {
+  margin-top: var(--space-2);
+  font-size: var(--text-xs);
+}
+
+.review-group__crossref {
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px dashed var(--border-subtle);
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+
+.review-group__crossref strong {
+  color: var(--text-secondary);
+  font-weight: 600;
+}
 
 .suggestion-list {
   list-style: none;
@@ -798,18 +1061,31 @@ button, input, select {
   gap: var(--space-2);
 }
 
+.suggestion-list:empty {
+  margin: 0;
+}
+
 .suggestion {
+  --suggestion-accent: var(--warning);
   border: 1px solid var(--border-subtle);
-  border-left: 2px solid var(--warning);
+  border-left: 2px solid var(--suggestion-accent);
   border-radius: var(--radius-sm);
   background: var(--surface-sunken);
   padding: var(--space-3);
   cursor: pointer;
 }
 
+.suggestion--dfm {
+  --suggestion-accent: var(--dfm);
+}
+
+.suggestion--structural {
+  --suggestion-accent: var(--structural);
+}
+
 .suggestion:hover,
 .suggestion--pinned {
-  border-color: var(--warning);
+  border-color: var(--suggestion-accent);
 }
 
 .suggestion__title {
@@ -833,15 +1109,22 @@ button, input, select {
 
 /* --- Charts ---------------------------------------------------------- */
 
+/* The diagrams are 480x260 SVGs scaled to fit. Past ~660px they stop
+   telling you anything more and start costing ~1/3 of a 1080p screen in
+   height, so the tracks cap there -- on a wide display the surplus becomes
+   symmetric margin (hence `justify-content: center`) rather than a taller
+   page. The 0 floor lets both tracks shrink together at tablet width
+   instead of overflowing. */
 .charts {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 660px));
   gap: var(--space-5);
+  justify-content: center;
 }
 
 @media (max-width: 700px) {
   .charts {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
@@ -970,6 +1253,15 @@ button, input, select {
 
 .local-buckling-section {
   margin-top: var(--space-2);
+}
+
+/* Inside the Buckling card the per-wall table is a sub-result of it, not
+   a sibling section -- ruled off from the Euler tiles above, but without
+   the full-weight heading that would read as a third top-level group. */
+.local-buckling-section__title {
+  margin-top: var(--space-5);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border-subtle);
 }
 
 .local-buckling-table-wrap {

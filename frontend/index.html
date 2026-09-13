@@ -16,6 +16,15 @@
     <span class="topbar__subtitle">Extrusion Analysis Tool</span>
   </div>
   <div class="topbar__actions">
+    <!-- Baseline is switched often enough to deserve a permanent,
+         always-visible entry point, not just the one inside the comparison
+         panel (which is itself only visible once a profile is loaded).
+         Both routes end in the same History/baseline picker. -->
+    <button type="button" class="btn btn--ghost topbar__baseline" id="btn-topbar-baseline" title="Change the comparison baseline">
+      <span class="topbar__baseline-label">Baseline:</span>
+      <span class="topbar__baseline-name" id="topbar-baseline-name">&mdash;</span>
+    </button>
+    <span class="topbar__divider" aria-hidden="true"></span>
     <button type="button" class="btn btn--ghost" id="btn-open-history">History</button>
     <input type="file" id="dxf-file-input" accept=".dxf" hidden />
     <button type="button" class="btn btn--ghost" id="btn-import-dxf">Import DXF</button>
@@ -32,8 +41,22 @@
 <div id="history-modal" class="modal-overlay" hidden>
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="history-modal-heading">
     <div class="modal__header">
-      <h2 id="history-modal-heading" class="panel__title">Run History</h2>
+      <h2 id="history-modal-heading" class="panel__title">Run History &amp; Baseline</h2>
       <button type="button" class="modal__close" id="btn-close-history" aria-label="Close history">&times;</button>
+    </div>
+    <!-- The history list is also the baseline picker (every baseline other
+         than the built-in one is a past run), so the modal states the
+         current baseline and offers the same "Use Built-in" reset the
+         comparison panel does -- the two entry points stay in lockstep. -->
+    <div class="modal__toolbar">
+      <div class="baseline-indicator baseline-indicator--modal">
+        <span class="baseline-indicator__label">Baseline:</span>
+        <span id="history-baseline-name" class="baseline-indicator__name">&mdash;</span>
+        <button type="button" class="btn btn--small btn--ghost" id="btn-modal-use-builtin">Use Built-in</button>
+      </div>
+      <p class="hint modal__toolbar-hint">
+        Click a run to reload it, or <strong>Set as Baseline</strong> to compare every profile against it.
+      </p>
     </div>
     <div class="modal__body">
       <p class="hint" id="history-empty-hint" hidden>No history yet — run a section or beam analysis to see it here.</p>
@@ -44,21 +67,69 @@
 
 <main class="layout">
 
-  <section class="panel panel--sketch" aria-labelledby="sketch-heading">
-    <h2 id="sketch-heading" class="panel__title">Sketch</h2>
-    <div class="canvas-well">
-      <canvas id="sketch-canvas" width="640" height="480" tabindex="0" aria-label="Polygon sketch area. Click to place vertices."></canvas>
-      <div class="coord-readout" id="coord-readout" hidden>0.0, 0.0 mm</div>
-    </div>
-    <div class="sketch-toolbar">
-      <button type="button" class="btn" id="btn-undo" disabled>Undo Point</button>
-      <button type="button" class="btn" id="btn-close-loop" disabled>Close Loop</button>
-      <button type="button" class="btn" id="btn-clear" disabled>Clear</button>
-      <span class="sketch-toolbar__spacer"></span>
-      <button type="button" class="btn btn--ghost" id="btn-export-dxf" disabled>Export DXF</button>
-    </div>
-    <p class="hint" id="sketch-hint">Click on the grid to place the first vertex of your profile.</p>
-  </section>
+  <div class="layout__main">
+
+    <section class="panel panel--sketch" aria-labelledby="sketch-heading">
+      <h2 id="sketch-heading" class="panel__title">Sketch</h2>
+      <div class="canvas-well">
+        <canvas id="sketch-canvas" width="640" height="480" tabindex="0" aria-label="Polygon sketch area. Click to place vertices."></canvas>
+        <div class="coord-readout" id="coord-readout" hidden>0.0, 0.0 mm</div>
+      </div>
+      <div class="sketch-toolbar">
+        <button type="button" class="btn" id="btn-undo" disabled>Undo Point</button>
+        <button type="button" class="btn" id="btn-close-loop" disabled>Close Loop</button>
+        <button type="button" class="btn" id="btn-clear" disabled>Clear</button>
+        <span class="sketch-toolbar__spacer"></span>
+        <button type="button" class="btn btn--ghost" id="btn-export-dxf" disabled>Export DXF</button>
+      </div>
+      <p class="hint" id="sketch-hint">Click on the grid to place the first vertex of your profile.</p>
+    </section>
+
+    <!-- Design review sits directly under the profile it describes: every
+         finding highlights geometry on the canvas above, so the list and
+         the thing it points at are in one eyeline. Split into the two
+         questions the checks actually answer -- can this be extruded (DFM),
+         and is the material doing structural work (Structural) -- because
+         the answers lead to different actions. -->
+    <section class="panel panel--design-review" id="suggestions-section" aria-labelledby="design-review-heading" hidden>
+      <h2 id="design-review-heading" class="panel__title">
+        Design Review <span class="optional-tag" id="suggestions-count"></span>
+      </h2>
+      <div class="review-groups">
+
+        <div class="review-group review-group--dfm" id="dfm-group">
+          <h3 class="review-group__title">
+            <span class="review-group__swatch" aria-hidden="true"></span>
+            DFM
+            <span class="optional-tag">can it be extruded — walls, corners, notches</span>
+          </h3>
+          <p class="hint review-group__empty" id="dfm-empty" hidden>
+            Nothing flagged — wall thickness, internal-corner and notch checks all pass.
+          </p>
+          <ul class="suggestion-list" id="dfm-list"></ul>
+        </div>
+
+        <div class="review-group review-group--structural" id="structural-group">
+          <h3 class="review-group__title">
+            <span class="review-group__swatch" aria-hidden="true"></span>
+            Structural
+            <span class="optional-tag">is the material earning its mass</span>
+          </h3>
+          <p class="hint review-group__empty" id="structural-empty" hidden>
+            Nothing flagged — material distribution and neutral-axis checks all pass.
+          </p>
+          <ul class="suggestion-list" id="structural-list"></ul>
+          <p class="hint review-group__crossref">
+            These read the geometry alone. Stability under a real load case — Euler column
+            buckling and per-wall plate buckling — needs a length and a load, so it is reported
+            in <strong>Beam Results</strong> instead.
+          </p>
+        </div>
+
+      </div>
+    </section>
+
+  </div>
 
   <section class="panel panel--controls" aria-labelledby="material-heading">
     <h2 id="material-heading" class="panel__title">Setup</h2>
@@ -104,20 +175,10 @@
       <div class="baseline-indicator">
         <span class="baseline-indicator__label">Baseline:</span>
         <span id="baseline-name" class="baseline-indicator__name">&mdash;</span>
+        <button type="button" class="btn btn--small" id="btn-change-baseline">Change&hellip;</button>
         <button type="button" class="btn btn--small btn--ghost" id="btn-use-builtin-baseline">Use Built-in</button>
       </div>
       <div id="baseline-metrics" class="baseline-metrics"></div>
-    </div>
-
-    <div id="suggestions-section" class="suggestions-section" hidden>
-      <details class="more-info">
-        <summary>Suggestions <span class="optional-tag" id="suggestions-count"></span></summary>
-        <p class="hint" id="suggestions-empty" hidden>
-          Nothing flagged — the geometry passes the wall-thickness, internal-corner and
-          material-distribution checks this tool runs.
-        </p>
-        <ul class="suggestion-list" id="suggestion-list"></ul>
-      </details>
     </div>
 
     <div id="beam-inputs" class="beam-inputs" hidden>
@@ -157,31 +218,53 @@
   <section class="panel panel--beam-results" id="beam-results" aria-labelledby="beam-results-heading" hidden>
     <h2 id="beam-results-heading" class="panel__title">Beam Results</h2>
 
-    <dl class="result-grid result-grid--summary" id="beam-summary-grid"></dl>
-
-    <div id="local-buckling-section" class="local-buckling-section" hidden>
-      <h3 class="panel__subtitle">
-        Local (Plate) Buckling <span class="optional-tag">per wall &mdash; separate from Euler buckling above</span>
+    <!-- Two conceptually separate questions, kept visually separate: what
+         the point loads do to the beam (strength/stiffness), and whether it
+         stays stable under the axial load (column and wall buckling).
+         Merging them into one tile strip made it read as one verdict. -->
+    <div class="beam-group beam-group--applied">
+      <h3 class="beam-group__title">
+        From the Applied Point Loads
+        <span class="optional-tag">bending moment, stress, deflection, support reactions</span>
       </h3>
-      <p class="hint">
-        Each flat wall checked as its own plate (k=4.0 both edges supported / k=0.425 outstand;
-        EN 1999-1-1 Table 6.2 classification). A wall can buckle locally well before the column
-        as a whole does, so this result stands on its own rather than folding into the Euler
-        figures above.
-      </p>
-      <div class="local-buckling-table-wrap">
-        <table class="dim-check-table local-buckling-table" id="local-buckling-table"></table>
+      <dl class="result-grid result-grid--summary" id="beam-summary-grid"></dl>
+
+      <div class="charts">
+        <div class="chart-container">
+          <h3 class="chart-title">Bending Stress Along Length</h3>
+          <div id="chart-stress" class="chart"></div>
+        </div>
+        <div class="chart-container">
+          <h3 class="chart-title">Deflection Curve</h3>
+          <div id="chart-deflection" class="chart"></div>
+        </div>
       </div>
     </div>
 
-    <div class="charts">
-      <div class="chart-container">
-        <h3 class="chart-title">Bending Stress Along Length</h3>
-        <div id="chart-stress" class="chart"></div>
-      </div>
-      <div class="chart-container">
-        <h3 class="chart-title">Deflection Curve</h3>
-        <div id="chart-deflection" class="chart"></div>
+    <div class="beam-group beam-group--buckling">
+      <h3 class="beam-group__title">
+        Buckling &mdash; Stability Under Axial Load
+        <span class="optional-tag">a separate failure mode from the stress check above</span>
+      </h3>
+      <p class="hint" id="buckling-no-axial" hidden>
+        No axial load entered, so there is no safety factor to report &mdash; the Euler load below
+        is the column capacity this profile and length would have.
+      </p>
+      <dl class="result-grid result-grid--summary" id="beam-buckling-grid"></dl>
+
+      <div id="local-buckling-section" class="local-buckling-section" hidden>
+        <h3 class="panel__subtitle panel__subtitle--sub local-buckling-section__title">
+          Local (Plate) Buckling <span class="optional-tag">per wall &mdash; separate from the Euler column result above</span>
+        </h3>
+        <p class="hint">
+          Each flat wall checked as its own plate (k=4.0 both edges supported / k=0.425 outstand;
+          EN 1999-1-1 Table 6.2 classification). A wall can buckle locally well before the column
+          as a whole does, so this result stands on its own rather than folding into the Euler
+          figures above.
+        </p>
+        <div class="local-buckling-table-wrap">
+          <table class="dim-check-table local-buckling-table" id="local-buckling-table"></table>
+        </div>
       </div>
     </div>
   </section>

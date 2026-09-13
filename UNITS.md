@@ -38,14 +38,37 @@ Both the flag names and the table header say so explicitly; internally the
 values are converted to MPa immediately (`* 1000`) and stored as MPa/Pa
 like everything else — GPa never leaks past that CLI boundary.
 
-The one other place a value legitimately leaves the mm-N-MPa/kg system is
-`eat.pdf_io`'s advisory mass check (extracted area × length × density vs.
+Two other places let a value leave the mm-N-MPa/kg system, both at a
+display boundary and both explicitly labeled.
+
+The first is `eat.pdf_io`'s advisory mass check (extracted area × length × density vs.
 a drawing's title-block weight): its `MassCheck.note` reports an implied
 density in **g/cm³**, the unit a material datasheet's density figure is
 usually quoted in and the one that keeps that one comparison's numbers in
 a readable range. It is explicitly labeled in the note text and is never
 fed back into any calculation — a self-contained, clearly-labeled
 exception, not a second convention.
+
+The second is the **baseline comparison's specific
+stiffness/strength metrics** (`frontend/app.js`,
+`buildBaselineMetricGroups`). Each divides an engine quantity by a mass
+per length in kg/m, which in the raw mm-N-MPa system produces a unit with
+a fraction inside it — `N/(kg/m)`, `N·mm²/(kg/m)`. Those are displayed in
+the equivalent simple SI form instead, rescaled once at the display
+boundary (`SPECIFIC_*_SCALE`) and never fed back into any calculation:
+
+| Metric                        | Raw            | Displayed  |
+|-------------------------------|----------------|------------|
+| Stiffness-to-weight, axial    | N/(kg/m)       | MN·m/kg    |
+| Stiffness-to-weight, bending  | N·mm²/(kg/m)   | N·m³/kg    |
+| Strength-to-weight, axial     | N/(kg/m)       | kN·m/kg    |
+| Strength-to-weight, bending   | N·mm/(kg/m)    | N·m²/kg    |
+
+The M/k prefixes are chosen to keep aluminium extrusions out of exponent
+notation. Note that `EA`, `EIxx`, `EIyy` and `GJ` in the Section Results
+panel are **not** converted: `N·mm²` is a product, not a nested fraction,
+and it is the form in which the reader can reproduce the number from the
+`mm⁴` and `MPa` rows sitting next to it.
 
 Every numeric field in the FastAPI response models (`eat/api.py`) carries
 its unit in the field's `description` (visible at `/docs`), even where the

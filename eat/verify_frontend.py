@@ -8,7 +8,10 @@ renders what comes back, for these flows:
 
 1. Sketch a 50x100mm rectangle by clicking its four corners -> close loop
    -> confirm the resulting POST /section response has the exact step-1
-   Area/Ixx/Iyy, and that the results panel actually renders.
+   Area/Ixx/Iyy, and that the results panel actually renders -- with the
+   main view trimmed to Area + Mass Per Length and everything else
+   (Centroid/Ixx/Iyy/Izz included) moved under "More Info" rather than
+   dropped. Checked as exact label lists both ways, not as counts.
 2. Import eat/fixtures/20X40_KJN992891.dxf (the real multi-loop catalog
    file) -> confirm POST /section/from-dxf returns the step-8
    holes-subtracted Area, the 3 interior holes are echoed back, and the
@@ -53,13 +56,26 @@ renders what comes back, for these flows:
    axial ones reduce to pure material properties) are unit-tested in
    isolation in eat/verify_baseline.py; this only checks the UI wiring
    end-to-end. The baseline selection is restored to its pre-test state
-   afterward, same as the history sweep above.
-6. With that same rectangle still loaded, open the Suggestions panel ->
-   confirm it starts collapsed like "More Info", lists the solid bar's one
-   finding, and that hovering it paints the highlight onto the sketch
-   canvas (counted in --warning pixels, a colour nothing else draws in)
-   while clicking pins it so it survives the mouse leaving. Whether the
-   suggestions themselves are sound is judged in
+   afterward, same as the history sweep above. Also confirms every metric
+   reads in simplest SI form (MN·m/kg, N·m³/kg, kN·m/kg, N·m²/kg -- no
+   nested "/(kg/m)" fraction anywhere), that the label was rescaled in step
+   with the number, and that exactly the two axial rows -- the two that
+   algebraically reduce to E/density and yield/density -- carry the note
+   saying so, with the bending rows and mass per length deliberately not
+   carrying it. Finally, that the baseline's three entry points (topbar
+   readout, the comparison panel's "Change…", the History modal) all name
+   the same baseline and both buttons reach the same picker.
+6. With that same rectangle still loaded, check the Design Review panel:
+   that it renders *below* the profile canvas (measured geometrically),
+   that the solid bar's one finding -- a wasted-core finding, which is a
+   Structural one -- lands in the Structural column and not the DFM one,
+   that the empty DFM column states it passed rather than rendering blank,
+   that Structural points at Beam Results for the load-dependent buckling
+   checks, and that hovering the finding paints it onto the sketch canvas
+   in the Structural colour specifically (counted as --structural pixels,
+   with --warning pixels confirmed absent, so a miscategorised highlight
+   fails) while clicking pins it so it survives the mouse leaving. Whether
+   the suggestions themselves are sound is judged in
    eat/verify_suggestions.py, against profiles with known right answers.
 
 7. Local (plate) buckling, reference case: a 60x40mm tube with a 1.2mm
@@ -81,7 +97,22 @@ renders what comes back, for these flows:
    with no wall structure to report (a solid bar) rather than rendering
    an empty table, while the Euler result above it still renders fully --
    the two are meant to read as separate results, never as one merged
-   into the other.
+   into the other. With the tube's results on screen (the one case here
+   carrying both a point load and an axial load), also confirms Beam
+   Results splits into exactly two groups and that nothing crosses between
+   them: moment/stress/deflection/reactions and both diagrams in the
+   applied-load group, the Euler tiles and the per-wall plate table in the
+   buckling group -- checked by DOM containment, not adjacency.
+
+8. Layout, at 1920x1080 / 1536x864 / 1440x900 / 1024x768: no horizontal
+   overflow at any of them (the per-wall plate table scrolls inside its own
+   wrapper rather than pushing the page sideways), the design-review panel
+   rendering directly below the canvas at every width, the profile canvas
+   fully above the fold on every 16:9 / 16:10 size, and the two review
+   categories side by side on desktop but stacked at tablet width. Column
+   balance is printed in the check's detail rather than asserted -- it
+   depends on how many findings the loaded profile has, so a threshold
+   would be a fixture check in disguise.
 
 Also checks two smaller additions to the sketch canvas / results panel:
 
@@ -103,9 +134,10 @@ Also checks two smaller additions to the sketch canvas / results panel:
   figure. Also confirms the comparison is skipped (hidden) entirely for
   the hole-free rectangle from flow 1.
 
-Also captures a full-page screenshot (saved under the path given on the
-command line, or eat/verify_frontend_screenshot.png by default) and checks
-the browser console for errors.
+Also captures two full-page screenshots -- a 16:9 desktop one at the path
+given on the command line (or eat/verify_frontend_screenshot.png by
+default) and a tablet-width one alongside it with a `_tablet` suffix --
+and checks the browser console for errors.
 
 Run with: python -m eat.verify_frontend [screenshot_path]
 """
@@ -229,6 +261,7 @@ def main() -> int:
     server = start_server()
     history_baseline_ids: set[str] = set()
     baseline_setting_before: dict | None = None
+    state_snapshotted = False  # gates the restore in the finally below
     try:
         if not wait_for_server():
             checks.append(Check("Server started", False, "timed out waiting for port"))
@@ -244,6 +277,7 @@ def main() -> int:
         # which the History flow's "set as baseline" actions change.
         history_baseline_ids = {e["id"] for e in _get_json(BASE_URL + "/history")}
         baseline_setting_before = _get_json(BASE_URL + "/baseline")
+        state_snapshotted = True
 
         with sync_playwright() as p:
             browser = p.chromium.launch()
@@ -316,29 +350,60 @@ def main() -> int:
                 # the DXF-import check below exercises the identical
                 # /section code path with exact vertices (no mouse
                 # involved) and matches step 1 exactly.
+                #
+                # The tolerance is 2.5% rather than the 1% it was before the
+                # 16:9 layout sweep, because that sweep caps the sketch
+                # column: at this 1440px test viewport the canvas is ~673px
+                # wide instead of ~749px, so pixels-per-mm drops from ~2.31
+                # to ~2.06 and the same fixed ~0.5px dispatch error becomes
+                # ~0.24mm instead of ~0.22mm. On the 50mm width that is
+                # ~0.5%, and Iyy goes with the width cubed, so ~1.5% --
+                # which is exactly what this check now reads. Nothing about
+                # the geometry pipeline changed; the ruler the mouse is
+                # using just got shorter.
                 checks.append(
                     Check(
                         "Sketch flow: Area/Ixx/Iyy close to step-1 (click precision, see comment)",
-                        _rel_close(section_resp["area"], 5000.0, tol=1e-2)
-                        and _rel_close(section_resp["ixx"], 4166666.6666666665, tol=1e-2)
-                        and _rel_close(section_resp["iyy"], 1041666.6666666666, tol=1e-2),
+                        _rel_close(section_resp["area"], 5000.0, tol=2.5e-2)
+                        and _rel_close(section_resp["ixx"], 4166666.6666666665, tol=2.5e-2)
+                        and _rel_close(section_resp["iyy"], 1041666.6666666666, tol=2.5e-2),
                         f"area={section_resp['area']}, ixx={section_resp['ixx']}, iyy={section_resp['iyy']}",
                     )
                 )
-            primary_count = page.locator("#section-result-grid-primary dt").count()
+            # The main view is deliberately two rows -- Area and Mass Per
+            # Length -- with everything else (second moments included) one
+            # click away under "More Info". Checked as an exact list, not a
+            # count: the point of the trim is *which* two questions the
+            # panel answers without being asked, so a swap that kept the
+            # count at two would defeat it.
+            primary_labels = page.locator("#section-result-grid-primary dt").all_inner_texts()
             checks.append(
                 Check(
-                    "Sketch flow: trimmed primary results rendered (Area/Centroid/Ixx/Iyy/Izz/Mass)",
-                    primary_count == 6,
-                    f"{primary_count} rows",
+                    "Sketch flow: main Section Results view is Area + Mass Per Length only",
+                    primary_labels == ["Area", "Mass Per Length"],
+                    f"{primary_labels}",
                 )
             )
-            secondary_count = page.locator("#section-result-grid-secondary dt").count()
+            # textContent, not inner_text(): this grid lives inside a
+            # collapsed <details>, and inner_text() reports "" for anything
+            # not currently rendered.
+            secondary_labels = page.eval_on_selector_all(
+                "#section-result-grid-secondary dt", "els => els.map((e) => e.textContent)"
+            )
+            moved_under_more_info = ["Centroid", "Ixx", "Iyy", "Izz"]
             checks.append(
                 Check(
-                    "Sketch flow: 'More Info' secondary results rendered",
-                    secondary_count >= 10,
-                    f"{secondary_count} rows",
+                    "Sketch flow: Centroid/Ixx/Iyy/Izz moved into 'More Info', not dropped",
+                    all(label in secondary_labels for label in moved_under_more_info)
+                    and not any(label in primary_labels for label in moved_under_more_info),
+                    f"secondary={secondary_labels}",
+                )
+            )
+            checks.append(
+                Check(
+                    "Sketch flow: 'More Info' still carries the full secondary set",
+                    len(secondary_labels) >= 16,
+                    f"{len(secondary_labels)} rows",
                 )
             )
             # Scoped to the results panel: the Suggestions section is a
@@ -971,7 +1036,12 @@ def main() -> int:
                             } else if (child.classList.contains('baseline-metric')) {
                                 const label = child.querySelector('.baseline-metric__label').textContent;
                                 const values = [...child.querySelectorAll('.baseline-metric__row-value')].map(e => e.textContent);
-                                out.push({ group, label, profile: values[0], baseline: values[1] });
+                                const note = child.querySelector('.baseline-metric__note');
+                                out.push({
+                                    group, label,
+                                    profile: values[0], baseline: values[1],
+                                    note: note ? note.textContent : null,
+                                });
                             }
                         }
                         return out;
@@ -984,6 +1054,38 @@ def main() -> int:
 
                 return {(m["group"], m["label"]): (parse(m["profile"]), parse(m["baseline"])) for m in raw}
 
+            def read_baseline_metric_meta():
+                """{(group, label): (unit_string, note_or_None)} from the
+                same DOM, for the unit-simplification and material-property
+                disclaimer checks."""
+                raw = page.evaluate(
+                    """
+                    () => {
+                        const container = document.getElementById('baseline-metrics');
+                        const out = [];
+                        let group = null;
+                        for (const child of container.children) {
+                            if (child.classList.contains('baseline-metric-group__title')) {
+                                group = child.textContent;
+                            } else if (child.classList.contains('baseline-metric')) {
+                                const note = child.querySelector('.baseline-metric__note');
+                                out.push({
+                                    group,
+                                    label: child.querySelector('.baseline-metric__label').textContent,
+                                    value: child.querySelector('.baseline-metric__row-value').textContent,
+                                    note: note ? note.textContent : null,
+                                });
+                            }
+                        }
+                        return out;
+                    }
+                    """
+                )
+                return {
+                    (m["group"], m["label"]): (m["value"].split(" ", 1)[1].strip(), m["note"])
+                    for m in raw
+                }
+
             metrics_vs_builtin = read_baseline_metrics()
             # 6061-T6 (E=69000 MPa, yield=241 MPa) 50x100mm rectangle
             # (textbook Ixx/Iyy/Z, mass=2700*0.005=13.5 kg/m) vs the
@@ -991,14 +1093,23 @@ def main() -> int:
             # (eat/verify_baseline.py: ei_xx=826,448,688.97,
             # ei_yy=3,187,731,329.51, governing Zxx=1199.49, Zyy=2313.30,
             # mass=0.7766685396, yield=214 MPa for 6063-T6).
+            #
+            # Displayed in simplified SI units rather than the compound
+            # N/(kg/m) and N·mm²/(kg/m) these come out of the engine in, so
+            # the expected figures below are the same quantities rescaled
+            # once (see app.js's SPECIFIC_* scales):
+            #   EA/μ    N/(kg/m)     -> MN·m/kg  (x 1e-6)
+            #   EI/μ    N·mm²/(kg/m) -> N·m³/kg  (x 1e-6)
+            #   σy·A/μ  N/(kg/m)     -> kN·m/kg  (x 1e-3)
+            #   σy·Z/μ  N·mm/(kg/m)  -> N·m²/kg  (x 1e-3)
             expected = {
                 (None, "Mass Per Length"): (13.499999999999968, 0.7766685396237651),
-                ("Stiffness-to-Weight", "Axial"): (25555555.555555556, 25518518.51851852),
-                ("Stiffness-to-Weight", "Bending (X)"): (5324074074.073969, 4104365204.5655146),
-                ("Stiffness-to-Weight", "Bending (Y)"): (21296296296.296963, 1064094458.3319955),
-                ("Strength-to-Weight", "Axial"): (89259.25925925927, 79259.25925925926),
-                ("Strength-to-Weight", "Bending (X)"): (743827.1604938096, 637397.0154675323),
-                ("Strength-to-Weight", "Bending (Y)"): (1487654.3209877005, 330502.48778381286),
+                ("Stiffness-to-Weight", "Axial"): (25.555555555555556, 25.51851851851852),
+                ("Stiffness-to-Weight", "Bending (X)"): (5324.074074073969, 4104.3652045655146),
+                ("Stiffness-to-Weight", "Bending (Y)"): (21296.296296296963, 1064.0944583319955),
+                ("Strength-to-Weight", "Axial"): (89.25925925925927, 79.25925925925926),
+                ("Strength-to-Weight", "Bending (X)"): (743.8271604938096, 637.3970154675323),
+                ("Strength-to-Weight", "Bending (Y)"): (1487.6543209877005, 330.50248778381286),
             }
             metrics_match = all(
                 key in metrics_vs_builtin
@@ -1013,6 +1124,112 @@ def main() -> int:
                     f"{metrics_vs_builtin} vs expected {expected}",
                 )
             )
+
+            # --- Units: simplest SI form, no fraction-inside-a-fraction ---
+            # These were the only compound units left in the UI. The values
+            # above already prove the rescaling is numerically right; this
+            # proves the label was rescaled with it, so the two can't drift
+            # apart (a wrong unit on a right number is the worse failure).
+            meta = read_baseline_metric_meta()
+            expected_units = {
+                (None, "Mass Per Length"): "kg/m",
+                ("Stiffness-to-Weight", "Axial"): "MN·m/kg",
+                ("Stiffness-to-Weight", "Bending (X)"): "N·m³/kg",
+                ("Stiffness-to-Weight", "Bending (Y)"): "N·m³/kg",
+                ("Strength-to-Weight", "Axial"): "kN·m/kg",
+                ("Strength-to-Weight", "Bending (X)"): "N·m²/kg",
+                ("Strength-to-Weight", "Bending (Y)"): "N·m²/kg",
+            }
+            unit_mismatches = [
+                f"{key}: {meta.get(key, (None, None))[0]!r} != {want!r}"
+                for key, want in expected_units.items()
+                if meta.get(key, (None, None))[0] != want
+            ]
+            checks.append(
+                Check(
+                    "Units: every baseline metric reads in simplest SI form (no '/(kg/m)' compounds)",
+                    not unit_mismatches,
+                    "; ".join(unit_mismatches),
+                )
+            )
+            compound_units = [
+                f"{key}: {unit!r}" for key, (unit, _) in meta.items() if "(" in unit or "/(" in unit
+            ]
+            checks.append(
+                Check(
+                    "Units: no unit anywhere in the comparison contains a nested fraction",
+                    not compound_units,
+                    "; ".join(compound_units),
+                )
+            )
+
+            # --- The two material-property-only rows carry their note ---
+            # Exactly two of the seven reduce algebraically to a material
+            # property (EA/μ = E/ρ, σy·A/μ = σy/ρ), so they read identically
+            # for any profile in the same alloy -- correct, but it looks
+            # like a broken comparison unexplained. The bending rows keep an
+            # I or a Z that does not cancel, and mass per length keeps its
+            # area, so those must NOT carry the note: checked both ways, so
+            # this can't pass by noting everything.
+            noted = {key for key, (_, note) in meta.items() if note}
+            expected_noted = {
+                ("Stiffness-to-Weight", "Axial"),
+                ("Strength-to-Weight", "Axial"),
+            }
+            checks.append(
+                Check(
+                    "Baseline: the two axial rows -- and only those -- are flagged as material-property-only",
+                    noted == expected_noted,
+                    f"noted={sorted(str(k) for k in noted)}",
+                )
+            )
+            # And the note says the thing that actually explains it.
+            axial_note = meta[("Stiffness-to-Weight", "Axial")][1] or ""
+            checks.append(
+                Check(
+                    "Baseline: the axial note explains the cancellation rather than just warning",
+                    "cancels the area" in axial_note and "density" in axial_note,
+                    f"{axial_note[:120]!r}",
+                )
+            )
+            # Same material both sides here (6061 rectangle vs 6063 KJN are
+            # different alloys, so these differ) -- but the *claim* the note
+            # makes is checked directly in eat/verify_baseline.py, which
+            # recomputes both axial metrics for two unrelated geometries in
+            # one material and asserts they land on E/rho and yield/rho.
+
+            # --- Baseline is reachable from, and consistent across, every
+            # entry point. It gets switched constantly, so there are three:
+            # the topbar (always visible, and doubles as the readout), the
+            # comparison panel's "Change…", and the History modal that lists
+            # the candidates. Redundancy is only useful if they agree, so
+            # what's checked is that all three name the same baseline and
+            # that both buttons reach the same picker. ---
+            panel_name = page.locator("#baseline-name").inner_text().strip()
+            topbar_name = page.locator("#topbar-baseline-name").inner_text().strip()
+            page.click("#btn-topbar-baseline")
+            page.wait_for_selector("#history-modal:not([hidden])", timeout=5000)
+            modal_name = page.locator("#history-baseline-name").inner_text().strip()
+            checks.append(
+                Check(
+                    "Baseline: the topbar readout opens the picker, and topbar / panel / modal "
+                    "all name the same baseline",
+                    panel_name != "" and panel_name == topbar_name == modal_name,
+                    f"panel={panel_name!r}, topbar={topbar_name!r}, modal={modal_name!r}",
+                )
+            )
+            page.click("#btn-close-history")
+            page.wait_for_selector("#history-modal", state="hidden", timeout=3000)
+            page.click("#btn-change-baseline")
+            page.wait_for_selector("#history-modal:not([hidden])", timeout=5000)
+            checks.append(
+                Check(
+                    "Baseline: the comparison panel's 'Change…' reaches the same picker",
+                    page.locator("#history-modal").is_visible(),
+                )
+            )
+            page.click("#btn-close-history")
+            page.wait_for_selector("#history-modal", state="hidden", timeout=3000)
 
             # --- Set this same rectangle entry as the baseline ---
             page.click("#btn-open-history")
@@ -1086,83 +1303,132 @@ def main() -> int:
                 )
             )
 
-            # --- Flow 6: suggestions panel ---
+            # --- Flow 6: design review panel (DFM / Structural) ---
             # The rectangle fixture is still loaded from flow 5, and a solid
-            # bar has exactly one thing to say about it (see
-            # eat/verify_suggestions.py) -- so this checks the panel is
-            # collapsed by default, lists that finding, and paints it onto
-            # the sketch when hovered and keeps it there when clicked.
+            # bar has exactly one thing to say about it -- a wasted-core
+            # finding (see eat/verify_suggestions.py), which is a Structural
+            # one. So this checks the panel sits under the canvas, that the
+            # finding lands in the Structural column and NOT the DFM one
+            # (with DFM showing its empty state rather than nothing at all),
+            # and that hovering paints it onto the sketch in that category's
+            # own colour, clicking pins it there.
             page.wait_for_selector("#suggestions-section:not([hidden])", timeout=8000)
-            suggestions_open = page.locator("#suggestions-section details").get_attribute("open")
-            checks.append(
-                Check("Suggestions: section is collapsed by default, like 'More Info'", suggestions_open is None)
-            )
 
-            page.locator("#suggestions-section summary").click()
-            page.wait_for_selector("#suggestion-list .suggestion", timeout=5000)
-            titles = page.locator(".suggestion__title").all_inner_texts()
+            # Placement: the panel must render below the sketch canvas, not
+            # beside it or above it -- checked geometrically, since that is
+            # the actual requirement, not a class name.
+            canvas_box = page.locator("#sketch-canvas").bounding_box()
+            review_box = page.locator("#suggestions-section").bounding_box()
             checks.append(
                 Check(
-                    "Suggestions: the solid rectangle's wasted-core finding is listed",
-                    len(titles) == 1 and "middle third" in titles[0],
-                    f"{titles}",
+                    "Design review: the panel sits below the profile canvas",
+                    review_box["y"] >= canvas_box["y"] + canvas_box["height"],
+                    f"canvas bottom={canvas_box['y'] + canvas_box['height']}, panel top={review_box['y']}",
+                )
+            )
+
+            page.wait_for_selector("#structural-list .suggestion", timeout=5000)
+            structural_titles = page.locator("#structural-list .suggestion__title").all_inner_texts()
+            dfm_titles = page.locator("#dfm-list .suggestion__title").all_inner_texts()
+            checks.append(
+                Check(
+                    "Design review: the solid rectangle's wasted-core finding is filed under Structural",
+                    len(structural_titles) == 1 and "middle third" in structural_titles[0],
+                    f"structural={structural_titles}",
                 )
             )
             checks.append(
                 Check(
-                    "Suggestions: the finding names the geometry it applies to",
-                    page.locator(".suggestion__detail").count() == 1
-                    and "Ixx" in page.locator(".suggestion__detail").first.inner_text(),
-                    page.locator(".suggestion__detail").first.inner_text()[:120],
+                    "Design review: it is NOT also (or instead) listed under DFM",
+                    dfm_titles == [],
+                    f"dfm={dfm_titles}",
+                )
+            )
+            checks.append(
+                Check(
+                    "Design review: the empty DFM category states it passed rather than rendering blank",
+                    page.locator("#dfm-empty").is_visible()
+                    and not page.locator("#structural-empty").is_visible(),
+                    f"dfm-empty visible={page.locator('#dfm-empty').is_visible()}, "
+                    f"structural-empty visible={page.locator('#structural-empty').is_visible()}",
+                )
+            )
+            checks.append(
+                Check(
+                    "Design review: the finding names the geometry it applies to",
+                    page.locator("#structural-list .suggestion__detail").count() == 1
+                    and "Ixx" in page.locator("#structural-list .suggestion__detail").first.inner_text(),
+                    page.locator("#structural-list .suggestion__detail").first.inner_text()[:120],
+                )
+            )
+            # The Structural column has to say where the load-dependent
+            # buckling checks went, or the split reads as "buckling was
+            # dropped" rather than "buckling lives in Beam Results".
+            crossref = page.locator("#structural-group .review-group__crossref").inner_text()
+            checks.append(
+                Check(
+                    "Design review: Structural points at Beam Results for the load-dependent buckling checks",
+                    "Beam Results" in crossref and "buckling" in crossref.lower(),
+                    f"{crossref[:140]!r}",
                 )
             )
 
-            # Pixel-level: the highlight is drawn in --warning (#FFB84D), a
-            # colour nothing else on the canvas uses, so counting those
-            # pixels says whether it actually rendered rather than just
-            # whether a class got toggled.
-            def warning_pixels():
+            # Pixel-level: the highlight is drawn in the finding's own
+            # category colour -- --structural (#8FA6FF) for this one, not the
+            # --warning amber a DFM finding would use. Counting those exact
+            # pixels says both that it rendered at all and that it rendered
+            # as the right category, rather than just that a class toggled.
+            def highlight_pixels(r0, g0, b0):
                 return page.evaluate(
                     """
-                    () => {
+                    ([r0, g0, b0]) => {
                         const canvas = document.getElementById('sketch-canvas');
                         const data = canvas.getContext('2d')
                             .getImageData(0, 0, canvas.width, canvas.height).data;
                         let n = 0;
                         for (let i = 0; i < data.length; i += 4) {
-                            if (Math.abs(data[i] - 255) < 25 && Math.abs(data[i + 1] - 184) < 35
-                                && Math.abs(data[i + 2] - 77) < 45) n++;
+                            if (Math.abs(data[i] - r0) < 20 && Math.abs(data[i + 1] - g0) < 20
+                                && Math.abs(data[i + 2] - b0) < 20) n++;
                         }
                         return n;
                     }
-                    """
+                    """,
+                    [r0, g0, b0],
                 )
 
-            before_hover = warning_pixels()
-            page.locator(".suggestion").first.hover()
+            def structural_pixels():
+                return highlight_pixels(0x8F, 0xA6, 0xFF)
+
+            def dfm_pixels():
+                return highlight_pixels(0xFF, 0xB8, 0x4D)
+
+            before_hover = structural_pixels()
+            page.locator("#structural-list .suggestion").first.hover()
             page.wait_for_timeout(250)
-            during_hover = warning_pixels()
+            during_hover = structural_pixels()
+            during_hover_dfm = dfm_pixels()
             checks.append(
                 Check(
-                    "Suggestions: hovering one highlights it on the sketch canvas",
-                    before_hover == 0 and during_hover > 0,
-                    f"before={before_hover}, hovering={during_hover}",
+                    "Design review: hovering a Structural finding highlights it on the canvas "
+                    "in the Structural colour, not the DFM one",
+                    before_hover == 0 and during_hover > 0 and during_hover_dfm == 0,
+                    f"before={before_hover}, hovering={during_hover}, dfm-coloured={during_hover_dfm}",
                 )
             )
 
-            page.locator(".suggestion").first.click()
+            page.locator("#structural-list .suggestion").first.click()
             page.mouse.move(5, 5)
             page.wait_for_timeout(250)
-            pinned_class = page.locator(".suggestion").first.get_attribute("class") or ""
+            pinned_class = page.locator("#structural-list .suggestion").first.get_attribute("class") or ""
             checks.append(
                 Check(
-                    "Suggestions: clicking pins the highlight so it survives the mouse leaving",
-                    "suggestion--pinned" in pinned_class and warning_pixels() > 0,
-                    f"class={pinned_class!r}, pixels={warning_pixels()}",
+                    "Design review: clicking pins the highlight so it survives the mouse leaving",
+                    "suggestion--pinned" in pinned_class and structural_pixels() > 0,
+                    f"class={pinned_class!r}, pixels={structural_pixels()}",
                 )
             )
 
-            page.locator(".suggestion").first.click()  # unpin, so the screenshot is clean
+            page.locator("#structural-list .suggestion").first.click()  # unpin, so the screenshot is clean
             page.wait_for_timeout(150)
 
             # A solid bar has no wall structure for this check to say
@@ -1422,59 +1688,250 @@ def main() -> int:
                         )
                     )
 
+            # --- Beam Results: the two questions are visually separate ---
+            # The tube case above is the one that has both -- an applied
+            # point load AND an axial load -- so it is where the split is
+            # actually testable. What matters is that no tile can be read as
+            # belonging to the other group: everything the point loads cause
+            # in one card, everything about axial stability in the other,
+            # each diagram with the quantity it plots.
+            # Tile labels are upper-cased by CSS and inner_text() returns
+            # what's rendered, so compare in upper case -- same reason the
+            # local-buckling subtitle check above does.
+            applied_labels = [t.upper() for t in page.locator("#beam-summary-grid dt").all_inner_texts()]
+            buckling_labels = [t.upper() for t in page.locator("#beam-buckling-grid dt").all_inner_texts()]
+            checks.append(
+                Check(
+                    "Beam Results: the applied-load group holds moment / stress / deflection and no buckling tile",
+                    {"MAX MOMENT", "MAX BENDING STRESS", "MAX DEFLECTION", "BENDING SAFETY FACTOR"}
+                    <= set(applied_labels)
+                    and not any("BUCKLING" in label or "EULER" in label for label in applied_labels),
+                    f"{applied_labels}",
+                )
+            )
+            checks.append(
+                Check(
+                    "Beam Results: the buckling group holds the Euler tiles and nothing from the load case",
+                    {"EULER BUCKLING LOAD", "EULER SAFETY FACTOR"} <= set(buckling_labels)
+                    and not any(
+                        word in label
+                        for label in buckling_labels
+                        for word in ("MOMENT", "DEFLECTION", "BENDING SAFETY")
+                    ),
+                    f"{buckling_labels}",
+                )
+            )
+            # Structural containment, not just adjacency: the per-wall plate
+            # table has to live inside the buckling card and the diagrams
+            # inside the applied-load card, or the headings are decoration.
+            containment = page.evaluate(
+                """
+                () => ({
+                    localBucklingInBucklingGroup: !!document
+                        .getElementById('local-buckling-section')
+                        .closest('.beam-group--buckling'),
+                    chartsInAppliedGroup: !!document
+                        .getElementById('chart-deflection')
+                        .closest('.beam-group--applied'),
+                    groupCount: document.querySelectorAll('#beam-results .beam-group').length,
+                })
+                """
+            )
+            checks.append(
+                Check(
+                    "Beam Results: the per-wall plate table sits inside the buckling group, "
+                    "the diagrams inside the applied-load group",
+                    containment["localBucklingInBucklingGroup"]
+                    and containment["chartsInAppliedGroup"]
+                    and containment["groupCount"] == 2,
+                    f"{containment}",
+                )
+            )
+
+            # --- Layout: 16:9 / 16:10 desktop and tablet ---
+            # The sweep this pass was aimed at, checked at each target size
+            # against the properties that are actually required rather than
+            # proxies for them:
+            #
+            #  * nothing overflows horizontally (the per-wall plate table is
+            #    the wide element; it has to scroll inside its own wrapper,
+            #    never push the page sideways);
+            #  * the profile canvas is fully visible without scrolling on a
+            #    16:9 / 16:10 screen -- what "optimized for 16:9" has to mean
+            #    for a sketching tool, and the reason the sketch column is
+            #    capped rather than free to grow with the window;
+            #  * the design-review panel renders directly under the canvas,
+            #    with nothing wedged between them -- that panel is what now
+            #    occupies the space a 4:3 canvas leaves below itself, which
+            #    used to be empty navy all the way down;
+            #  * the two review categories sit side by side where the column
+            #    is wide enough for two readable measures, and stack at
+            #    tablet width.
+            #
+            # Column *balance* is deliberately reported rather than asserted:
+            # it depends entirely on how many findings the loaded profile has
+            # (the tube on screen here has none, so the panel is two
+            # empty-state lines), and a threshold tuned on one fixture would
+            # be a fixture check wearing a layout check's label.
+            layout_notes: list[str] = []
+            layout_failures: list[str] = []
+            for label, vw, vh, canvas_must_fit, want_side_by_side in (
+                ("1920x1080 16:9", 1920, 1080, True, True),
+                ("1536x864 16:9", 1536, 864, True, True),
+                ("1440x900 16:10", 1440, 900, True, True),
+                ("1024x768 tablet", 1024, 768, False, False),
+            ):
+                page.set_viewport_size({"width": vw, "height": vh})
+                page.wait_for_timeout(350)  # debounced resize -> layoutCanvas()
+                m = page.evaluate(
+                    """
+                    () => {
+                        const r = (el) => el.getBoundingClientRect();
+                        const canvas = r(document.getElementById('sketch-canvas'));
+                        const review = r(document.getElementById('suggestions-section'));
+                        const left = r(document.querySelector('.layout__main'));
+                        const right = r(document.querySelector('.panel--controls'));
+                        const dfm = r(document.getElementById('dfm-group'));
+                        const structural = r(document.getElementById('structural-group'));
+                        return {
+                            scrollWidth: document.documentElement.scrollWidth,
+                            innerWidth: window.innerWidth,
+                            canvasBottomFromTop: canvas.bottom + window.scrollY,
+                            reviewTop: review.top,
+                            reviewVisible: review.height > 0,
+                            canvasBottom: canvas.bottom,
+                            leftHeight: left.height,
+                            rightHeight: right.height,
+                            categoriesSideBySide: Math.abs(dfm.top - structural.top) < 4,
+                        };
+                    }
+                    """
+                )
+                taller = max(m["leftHeight"], m["rightHeight"])
+                gap_fraction = abs(m["leftHeight"] - m["rightHeight"]) / taller if taller else 0.0
+                layout_notes.append(
+                    f"{label}: canvas bottom={m['canvasBottomFromTop']:.0f}, "
+                    f"column gap={gap_fraction:.0%}"
+                )
+                if m["scrollWidth"] > m["innerWidth"] + 1:
+                    layout_failures.append(
+                        f"{label}: page scrolls horizontally ({m['scrollWidth']} > {m['innerWidth']})"
+                    )
+                if not m["reviewVisible"]:
+                    layout_failures.append(f"{label}: the design-review panel did not render")
+                # Below the canvas, and immediately below it: a gap larger
+                # than the grid gap plus the panel's own chrome would mean
+                # something got between them, or the panel drifted out of
+                # the sketch column entirely.
+                gap_below_canvas = m["reviewTop"] - m["canvasBottom"]
+                if not (0 <= gap_below_canvas <= 160):
+                    layout_failures.append(
+                        f"{label}: design review is not directly below the canvas "
+                        f"(gap {gap_below_canvas:.0f}px)"
+                    )
+                if canvas_must_fit and m["canvasBottomFromTop"] > vh:
+                    layout_failures.append(
+                        f"{label}: the profile canvas runs past the fold "
+                        f"({m['canvasBottomFromTop']:.0f} > {vh})"
+                    )
+                if m["categoriesSideBySide"] != want_side_by_side:
+                    layout_failures.append(
+                        f"{label}: DFM/Structural side-by-side={m['categoriesSideBySide']}, "
+                        f"expected {want_side_by_side}"
+                    )
+
+            checks.append(
+                Check(
+                    "Layout: no horizontal overflow, canvas above the fold, design review under it, "
+                    "categories side-by-side on desktop and stacked on tablet",
+                    not layout_failures,
+                    "; ".join(layout_failures) if layout_failures else "; ".join(layout_notes),
+                )
+            )
+
+            # Two screenshots, not one: a 16:9 desktop (the size this sweep
+            # targeted) and the tablet width where the two-column grid and
+            # the design-review split both collapse.
             screenshot_path.parent.mkdir(parents=True, exist_ok=True)
+            tablet_path = screenshot_path.with_name(screenshot_path.stem + "_tablet" + screenshot_path.suffix)
+            page.set_viewport_size({"width": 1024, "height": 768})
+            page.wait_for_timeout(350)
+            page.screenshot(path=str(tablet_path), full_page=True)
+            checks.append(Check(f"Tablet-width screenshot saved to {tablet_path}", tablet_path.exists()))
+
+            page.set_viewport_size({"width": 1920, "height": 1080})
+            page.wait_for_timeout(350)
             page.screenshot(path=str(screenshot_path), full_page=True)
             checks.append(Check(f"Screenshot saved to {screenshot_path}", screenshot_path.exists()))
 
             checks.append(Check("No browser console errors", len(console_errors) == 0, "; ".join(console_errors[:5])))
 
             browser.close()
-
-        # Sweep up every history entry any flow above created (sketch,
-        # DXF import, beam analysis all log one; loading/deleting in flow
-        # 4 deliberately don't), restoring eat/history.json to its
-        # pre-test state -- same discipline verify_api.py applies to the
-        # same file.
-        history_after = _get_json(BASE_URL + "/history")
-        for e in history_after:
-            if e["id"] not in history_baseline_ids:
-                _delete(f"{BASE_URL}/history/{e['id']}")
-        history_final_count = len(_get_json(BASE_URL + "/history"))
-        checks.append(
-            Check(
-                "History file restored to its pre-test state",
-                history_final_count == len(history_baseline_ids),
-                f"baseline={len(history_baseline_ids)}, final={history_final_count}",
-            )
-        )
-
-        # The baseline flow below sets a history entry as the baseline
-        # (then restarts the server to prove it persists) -- restore
-        # whatever was selected before this script ran. The entry it
-        # referenced, if any, is untouched by the sweep above (it
-        # predates this run, so it's in history_baseline_ids).
-        if baseline_setting_before is not None:
-            if baseline_setting_before["source"] == "history":
-                _post_json(BASE_URL + "/baseline", {"type": "history", "entry_id": baseline_setting_before["history_entry_id"]})
-            else:
-                _post_json(BASE_URL + "/baseline", {"type": "builtin"})
-            baseline_final = _get_json(BASE_URL + "/baseline")
-            checks.append(
-                Check(
-                    "Baseline setting restored to its pre-test state",
-                    baseline_final["source"] == baseline_setting_before["source"]
-                    and baseline_final["history_entry_id"] == baseline_setting_before["history_entry_id"],
-                    f"before={baseline_setting_before}, after={baseline_final}",
-                )
-            )
     finally:
-        server.terminate()
+        # In the `finally`, not at the end of the happy path: these two
+        # files are the ones a real user's runs and preferences live in,
+        # and a flow that raises (a changed selector, a hung
+        # wait_for_selector, Ctrl-C) used to skip the restore entirely and
+        # leave this script's fixtures sitting in eat/history.json. That
+        # has actually happened. The server is still up at this point --
+        # it is torn down in the inner `finally` below, after the restore
+        # has had its chance to run.
         try:
-            server.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            server.kill()
+            if state_snapshotted:
+                _restore_state(checks, history_baseline_ids, baseline_setting_before)
+        except Exception as exc:  # never mask the original failure
+            checks.append(Check("History/baseline restored to pre-test state", False, repr(exc)))
+        finally:
+            server.terminate()
+            try:
+                server.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                server.kill()
 
     return _report(checks)
+
+
+def _restore_state(
+    checks: list[Check], history_baseline_ids: set[str], baseline_setting_before: dict | None
+) -> None:
+    """Put eat/history.json and eat/baseline.json back exactly as they were
+    before this run. Sweeps up every history entry any flow created (sketch,
+    DXF import and beam analysis each log one; loading/deleting in flow 4
+    deliberately don't) -- same discipline verify_api.py applies to the same
+    file -- then restores whichever baseline was selected, since the
+    baseline flow deliberately changes it. The entry that setting referenced,
+    if any, predates this run and so is in `history_baseline_ids`, untouched
+    by the sweep."""
+    history_after = _get_json(BASE_URL + "/history")
+    for e in history_after:
+        if e["id"] not in history_baseline_ids:
+            _delete(f"{BASE_URL}/history/{e['id']}")
+    history_final_count = len(_get_json(BASE_URL + "/history"))
+    checks.append(
+        Check(
+            "History file restored to its pre-test state",
+            history_final_count == len(history_baseline_ids),
+            f"baseline={len(history_baseline_ids)}, final={history_final_count}",
+        )
+    )
+
+    if baseline_setting_before is not None:
+        if baseline_setting_before["source"] == "history":
+            _post_json(
+                BASE_URL + "/baseline",
+                {"type": "history", "entry_id": baseline_setting_before["history_entry_id"]},
+            )
+        else:
+            _post_json(BASE_URL + "/baseline", {"type": "builtin"})
+        baseline_final = _get_json(BASE_URL + "/baseline")
+        checks.append(
+            Check(
+                "Baseline setting restored to its pre-test state",
+                baseline_final["source"] == baseline_setting_before["source"]
+                and baseline_final["history_entry_id"] == baseline_setting_before["history_entry_id"],
+                f"before={baseline_setting_before}, after={baseline_final}",
+            )
+        )
 
 
 def _report(checks: list[Check]) -> int:
