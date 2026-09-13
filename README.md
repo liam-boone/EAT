@@ -3,8 +3,9 @@
 A quick-turnaround tool for sizing extruded (aluminum, plastic) profiles.
 Sketch or import a cross-section and get its section properties instantly;
 add a length, boundary condition, and point loads to get bending stress,
-deflection, safety factor, and Euler buckling. It's a fast engineering-
-formula tool built on real section geometry — not a full FEA solver.
+deflection, safety factor, and both global and local buckling. It's a fast
+engineering-formula tool built on real section geometry — not a full FEA
+solver.
 
 ## Requirements
 
@@ -45,9 +46,13 @@ To stop the server, close the terminal window it's running in (or Ctrl+C).
    stiffness per unit length, etc.
 4. **Optionally add length & loads** — beam length, boundary condition,
    one or more point loads, and (optionally) an axial load — to unlock
-   bending stress, deflection, safety factor, and Euler buckling results,
+   bending stress, deflection, safety factor, and buckling results,
    including two charts (stress and deflection along the beam's length).
-   Click **Analyze beam** to run it.
+   Click **Analyze beam** to run it. Buckling comes back twice over:
+   global Euler buckling of the member as a column, and a local
+   (plate) buckling check on each flat wall of the section, since a
+   thin-walled profile can fail by a wall rippling long before the
+   column itself is in any danger.
 5. **Export DXF** at any point to save your sketched (or edited) profile
    back out as a `.dxf` file.
 
@@ -58,7 +63,9 @@ To stop the server, close the terminal window it's running in (or Ctrl+C).
 - DXF import/export only — no DWG (proprietary format, no viable open
   library).
 - Point loads only — no distributed loads.
-- Global (Euler) buckling only — no local/plate buckling.
+- Buckling is checked two ways: global (Euler) column buckling for the
+  member, and local (plate) buckling per wall of the section. Both are
+  reported; neither replaces the other.
 
 ## The material list
 

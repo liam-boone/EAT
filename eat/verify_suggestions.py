@@ -4,14 +4,16 @@ Verification harness for the design-suggestions engine (build step 11).
 The thing worth verifying here isn't that the code runs, it's that the
 suggestions are ones a competent extrusion engineer would actually make
 -- and, just as importantly, that a well-designed profile comes back
-quiet. So this runs the engine against five profiles whose right answer
-is known by inspection:
+quiet. So this runs the engine against profiles whose right answer is
+known by inspection:
 
   L-angle, no fillet      -> exactly the unfilleted inner corner, nothing else
   solid 50x100 bar        -> exactly the wasted core, with hand-checkable figures
   filleted 60x40 tube     -> silent (uniform walls, radiused corners, hollow)
   20x40 KJN T-slot        -> silent (real commercial part, in production)
   deliberately bad box    -> the 0.8mm wall, the square voids, the lopsided material
+  heavy-wall tube         -> exactly the 10mm wall it was built with (2.5x the rest)
+  2:1 tube                -> silent (8mm on 4mm is the practice limit, not past it)
 
 The filleted tube and the KJN matter as much as the failing cases: the
 tube's 3mm inner radii must NOT read as sharp corners (they arrive as
@@ -19,6 +21,30 @@ arc polylines, which is exactly what a filleted corner looks like coming
 out of a DXF), and the KJN has 28 sharp internal corners that are all
 functional slot and keyway features, which the engine is expected to
 leave alone.
+
+The last two are the thick-wall check's pair. They are the same tube as
+the "good" one with a single wall thickened -- to 10mm, which is past
+what extrusion practice will take, and to 8mm, which is exactly the 2:1
+limit it quotes. One has to fire and the other has to stay quiet, and
+nothing else about either profile changes, so a thick-wall finding can
+only have come from the thickness that was altered.
+
+`run_notch_checks` uses the same trick again, cutting slots into that
+tube's bottom wall. Its own pair is a slot 3.2mm deep (leaving 0.8mm,
+reported) against the identical slot 3.0mm deep (leaving exactly the
+1.0mm minimum wall, silent), which is the notch check's entire
+sensitivity in two fixtures.
+
+WHAT IS NOT COVERED HERE: the notch check's real false-positive risk is
+functional slots on production profiles, and the profiles that prove it
+are the confidential supplier PDFs in the project root, which are not in
+git and cannot be a fixture. They were used during development -- the
+check's floor is set where it is because the thinnest notch-shaped
+candidate across all seven of them is 1.476mm -- and `eat/verify_pdf.py`
+is where they get exercised when present. If that floor is ever changed,
+re-run against those drawings, not against this file alone: every fixture
+here would happily pass a much more sensitive check that buries a real
+drawing in findings.
 
 Also cross-checks `polygon_moments`, the exact shoelace area/centroid/
 inertia used throughout the engine, against eat.section's meshed FE
@@ -33,6 +59,8 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from pathlib import Path
+
+from shapely.geometry import Polygon, box
 
 from eat.dxf_io import import_polygon_from_bytes
 from eat.section import Material, analyze_section
@@ -202,6 +230,194 @@ def run_rectangle_checks() -> list[Check]:
     return checks
 
 
+def _notched(*cuts):
+    """The good tube with rectangular slots cut out of it. Built by
+    subtraction rather than by splicing vertices so the fixture is
+    obviously the good tube plus exactly the cut described."""
+    tube = Polygon(rounded_rect(0, 0, 60, 40, 3.0), [rounded_rect(4, 4, 56, 36, 3.0, ccw=False)])
+    for c in cuts:
+        tube = tube.difference(c)
+    return list(tube.exterior.coords)[:-1], [list(r.coords)[:-1] for r in tube.interiors]
+
+
+def run_notch_checks() -> list[Check]:
+    """Slots cut into the good tube's 4mm bottom wall.
+
+    The tube is silent, so anything reported can only be about the cut.
+    The pair that matters is the first two: an 0.8mm-wide slot 3.2mm deep
+    leaves 0.8mm and is reported, the same slot 3.0mm deep leaves exactly
+    1.0mm and is not. That is the check's whole sensitivity -- it reports a
+    notch when what the notch leaves is under the practical minimum wall,
+    and not otherwise. See the module docstring for why it is scoped that
+    way rather than on how deep the cut is relative to the wall.
+
+    The corner check must stay silent on all of these, which is the
+    original limitation being demonstrated: the slot's faces are 0.8mm and
+    3.2mm against a 5.4mm minimum-face bar, so both are far too short for
+    it however deep the slot goes."""
+    checks: list[Check] = []
+
+    deep = generate_suggestions(*_notched(box(29.6, -1.0, 30.4, 3.2)))
+    kinds = [s.kind for s in deep]
+    checks.append(
+        Check(
+            "Notched tube (0.8 x 3.2mm slot, 0.8mm left): exactly one finding, the notch",
+            kinds == ["narrow_notch"],
+            f"got {kinds}",
+        )
+    )
+    if kinds == ["narrow_notch"]:
+        notch = deep[0]
+        checks.append(
+            Check(
+                "Notched tube: quotes 0.80mm left of a 4.00mm wall, 3.20mm deep",
+                "0.80 mm" in notch.title and "4.00 mm" in notch.title and "3.20 mm" in notch.title,
+                f"title={notch.title!r}",
+            )
+        )
+        checks.append(
+            Check(
+                "Notched tube: located at the slot root (x ~ 30, y ~ 3.2)",
+                len(notch.points) == 1
+                and abs(notch.points[0][0] - 30.0) < 0.6
+                and abs(notch.points[0][1] - 3.2) < 0.6,
+                f"points={notch.points}",
+            )
+        )
+        checks.append(
+            Check(
+                "Notched tube: reported once, not once per face of the same slot",
+                len([s for s in deep if s.kind == "narrow_notch"]) == 1,
+                f"got {len(deep)} findings",
+            )
+        )
+
+    shallower = generate_suggestions(*_notched(box(29.6, -1.0, 30.4, 3.0)))
+    checks.append(
+        Check(
+            "Same slot 3.0mm deep (leaves exactly the 1.0mm minimum wall): silent",
+            shallower == [],
+            f"got {[s.title for s in shallower]}",
+        )
+    )
+
+    shallow = generate_suggestions(*_notched(box(29.6, -1.0, 30.4, 1.0)))
+    checks.append(
+        Check(
+            "Same slot 1.0mm deep (leaves 3mm of a 4mm wall): silent",
+            shallow == [],
+            f"got {[s.title for s in shallow]}",
+        )
+    )
+
+    hairline = generate_suggestions(*_notched(box(29.8, -1.0, 30.2, 3.4)))
+    checks.append(
+        Check(
+            "Hairline slot (0.4 x 3.4mm, 0.6mm left): flagged, and reported at 0.60mm",
+            [s.kind for s in hairline] == ["narrow_notch"] and "0.60 mm" in hairline[0].title,
+            f"got {[s.title for s in hairline]}",
+        )
+    )
+
+    two = generate_suggestions(*_notched(box(19.6, -1.0, 20.4, 3.2), box(39.6, -1.0, 40.4, 3.2)))
+    xs = sorted(round(s.points[0][0]) for s in two if s.kind == "narrow_notch")
+    checks.append(
+        Check(
+            "Two separate slots 20mm apart: reported as two findings, not merged",
+            len([s for s in two if s.kind == "narrow_notch"]) == 2 and xs == [20, 40],
+            f"got {[s.title for s in two]}",
+        )
+    )
+
+    # A wide flat-bottomed groove leaves the same 0.8mm but over 8mm of
+    # boundary, so it reads as a thin wall. This is the documented
+    # deduplication: the thin-wall finding owns that metal and the notch
+    # is suppressed rather than both being reported.
+    groove = generate_suggestions(*_notched(box(26.0, -1.0, 34.0, 3.2)))
+    kinds = [s.kind for s in groove]
+    checks.append(
+        Check(
+            "Wide groove (8 x 3.2mm): reported as a thin wall only, notch deduplicated away",
+            "thin_wall" in kinds and "narrow_notch" not in kinds,
+            f"got {kinds}",
+        )
+    )
+    return checks
+
+
+def run_heavy_wall_checks() -> list[Check]:
+    """The good 60x40 tube with its right-hand wall left at 10mm instead
+    of 4mm -- the mistake the thick-wall check exists to catch, and the
+    one the abandoned ray-cast measure could never find because it could
+    not tell a thick wall from a long leg.
+
+    Everything else about the profile is identical to the silent good
+    tube: same envelope, same 3mm radii, same 4mm walls on the other three
+    sides. So the finding can only be about the thickness that changed,
+    and the figures are exact by construction -- 10.00mm against a 4.00mm
+    typical wall, over the 32mm height of that wall."""
+    outer = rounded_rect(0, 0, 60, 40, 3.0)
+    holes = [rounded_rect(4, 4, 50, 36, 3.0, ccw=False)]
+    found = generate_suggestions(outer, holes)
+    by_kind = {s.kind: s for s in found}
+    checks = [
+        Check(
+            "Heavy-wall tube: flags the thick wall",
+            "thick_wall" in by_kind,
+            f"got {[s.kind for s in found]}",
+        )
+    ]
+    if "thick_wall" in by_kind:
+        thick = by_kind["thick_wall"]
+        checks.append(
+            Check(
+                "Heavy-wall tube: measured at 10.00mm against the 4.00mm typical wall, 2.5x",
+                "10.00 mm" in thick.title and "4.00 mm" in thick.detail and "2.5x" in thick.title,
+                f"title={thick.title!r}",
+            )
+        )
+        checks.append(
+            Check(
+                "Heavy-wall tube: located on the right-hand wall (x ~ 50 or 60)",
+                len(thick.points) == 1 and abs(abs(thick.points[0][0] - 55.0) - 5.0) < 1.0,
+                f"points={thick.points}",
+            )
+        )
+        run_mm = float(thick.detail.split("over about ")[1].split(" mm of boundary")[0])
+        checks.append(
+            Check(
+                "Heavy-wall tube: reports most of that wall's 32mm height, not a corner's worth",
+                25.0 <= run_mm <= 34.0,
+                f"run reported as {run_mm} mm (the wall is 32mm tall between the 3mm radii)",
+            )
+        )
+    checks.append(
+        Check(
+            "Heavy-wall tube: no thin-wall finding (the other three walls are the 4mm norm)",
+            "thin_wall" not in by_kind,
+            f"got {[s.kind for s in found]}",
+        )
+    )
+    return checks
+
+
+def run_two_to_one_tube_checks() -> list[Check]:
+    """The same tube with an 8mm right-hand wall: exactly 2:1 against the
+    4mm the rest of it runs at, which is the limit extrusion practice
+    quotes rather than something past it. It has to come back quiet, or
+    the check is nagging about geometry the design manuals allow."""
+    outer = rounded_rect(0, 0, 60, 40, 3.0)
+    holes = [rounded_rect(4, 4, 52, 36, 3.0, ccw=False)]
+    found = generate_suggestions(outer, holes)
+    return [
+        Check(
+            "2:1 tube (8mm on 4mm): silent -- at the practice limit, not past it",
+            found == [],
+            f"got {[s.title for s in found]}",
+        )
+    ]
+
+
 def run_good_tube_checks() -> list[Check]:
     """A well-made hollow section: uniform 4mm walls, 3mm radii on every
     internal corner, material out at the extremities. The radii arrive as
@@ -301,6 +517,9 @@ def main() -> int:
         + run_good_tube_checks()
         + run_kjn_checks()
         + run_bad_box_checks()
+        + run_heavy_wall_checks()
+        + run_two_to_one_tube_checks()
+        + run_notch_checks()
     )
     width = max(len(c.label) for c in checks) + 2
     all_passed = True

@@ -50,6 +50,8 @@ from pydantic import BaseModel, Field, model_validator
 from eat import baseline, history, suggestions
 from eat.beam import BeamResult, BoundaryCondition, PointLoad, analyze_beam
 from eat.dxf_io import DxfImportError, export_polygon_to_text, import_polygon_from_bytes
+from eat.local_buckling import analyze_local_buckling
+from eat.local_buckling import as_dict as local_buckling_as_dict
 from eat.pdf_io import PdfImportError, _fmt_scale
 from eat.pdf_io import import_profile_from_bytes as import_pdf_profile_from_bytes
 from eat.materials import (
@@ -561,6 +563,15 @@ class BeamResponse(BaseModel):
     moment_diagram: list[float] = Field(description="N*mm, same length as diagram_x")
     bending_stress_diagram: list[float] = Field(description="MPa (magnitude), same length as diagram_x")
     deflection_diagram: list[float] = Field(description="mm, same length as diagram_x")
+    local_buckling: dict | None = Field(
+        default=None,
+        description=(
+            "Per-wall plate buckling check (eat.local_buckling), reported ALONGSIDE the global "
+            "Euler result above, not instead of it: Euler asks whether the member buckles as a "
+            "column, this asks whether a wall of the section buckles as a plate first. Null on "
+            "history entries stored before this check existed."
+        ),
+    )
 
     @classmethod
     def from_result(cls, result: BeamResult) -> "BeamResponse":
@@ -613,6 +624,26 @@ def post_beam(req: BeamRequest) -> BeamResponse:
         raise HTTPException(400, str(exc)) from exc
 
     response = BeamResponse.from_result(result)
+
+    # Local (plate) buckling, alongside the global Euler result. Failing to
+    # segment an odd profile must never take the beam analysis down with
+    # it, so this is best-effort: the rest of the result stands either way.
+    try:
+        response.local_buckling = local_buckling_as_dict(
+            analyze_local_buckling(
+                vertices,
+                holes,
+                material,
+                applied_axial_stress=(
+                    abs(req.axial_load) / section.area if req.axial_load and section.area else None
+                ),
+                moment=result.max_moment,
+                bending_axis=result.load_axis,
+                section=section,
+            )
+        )
+    except (ValueError, ZeroDivisionError):
+        response.local_buckling = None
 
     history.add_entry(
         material=section.material,
@@ -772,7 +803,9 @@ def post_baseline(req: BaselineSelectionRequest) -> BaselineResponse:
 
 
 class SuggestionResponse(BaseModel):
-    kind: str = Field(description="thin_wall | sharp_corner | material_distribution | core_material")
+    kind: str = Field(
+        description="thin_wall | thick_wall | sharp_corner | material_distribution | core_material"
+    )
     title: str
     detail: str
     ring: str | None = Field(None, description="'outer' or 'hole N', when the finding sits on a ring")

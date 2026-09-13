@@ -11,36 +11,55 @@ profile should come back quiet.
 
 What's checked, and why each threshold:
 
-1. Thin walls. Local wall thickness is sampled along the whole boundary
-   (every ~0.4mm) by casting a ray into the material and taking the first
-   face it hits. A wall is flagged below 0.6x the profile's typical wall
-   (the length-weighted median, so it's the typical millimetre of wall
-   rather than the typical face) or below 1.0mm outright, which is about
-   the practical floor for filling 6xxx aluminium. Two guards keep it
-   honest. A finding must persist over at least twice the typical wall
-   thickness of boundary, which distinguishes a real wall from the rib
-   junctions and end caps a single ray happens to sample. And the check
-   is skipped entirely unless the typical wall is under a quarter of the
-   profile's smaller bounding-box dimension: a solid bar has no walls,
-   and its two dimensions aren't a uniformity problem.
+1. Wall thickness, in both directions. Local thickness is sampled along
+   the whole boundary (every ~0.4mm) by `eat.thickness`, which measures
+   the diameter of the largest circle that fits inside the profile and
+   touches the boundary at that point. That is a medial-axis measure, not
+   a ray cast -- see that module for why the ray cast was abandoned and
+   why the inscribed circle cannot make the same mistake. The profile's
+   "typical wall" is the length-weighted median of the sweep, so it is
+   the thickness of the typical millimetre of wall rather than of the
+   typical face.
 
-   KNOWN LIMITATION (v1, accepted): there is deliberately no "thick wall"
-   counterpart, despite thickness uniformity cutting both ways in
-   principle. Ray casting cannot distinguish genuine thickness from a long
-   off-axis leg: a ray normal to a boundary only measures a wall when it
-   crosses one, and when it happens to run lengthwise up a leg or a rib it
-   measures how long that feature is, which reads as a hugely thick wall.
-   In testing that produced a false positive on every profile tried and a
-   true positive on none -- the L-angle's 60mm "wall" was the length of
-   its vertical leg, and the commercial T-slot fixture's was a ray running
-   up the inside of its outer wall -- and tightening the thresholds did
-   not separate them. The underlying concern (material that isn't earning
-   its mass) is caught by check 4 instead, which integrates area and
-   inertia exactly rather than inferring them from ray casts, so nothing
-   is actually going unnoticed. A real fix needs a medial-axis or
-   maximum-inscribed-circle thickness measure: that's a backlog item, not
-   a v1 blocker. Don't re-add a ray-cast version without solving this
-   first -- it has already been tried and it doesn't work.
+   Thin is flagged below 0.6x the typical wall, or below 1.0mm outright,
+   which is about the practical floor for filling 6xxx aluminium.
+
+   Thick is flagged above 2.0x the typical wall. Extrusion design practice
+   puts the workable limit on thickness variation within one profile at
+   roughly 2:1: past that the thin sections fill and freeze while the
+   thick ones are still moving, so the die cannot be balanced to run the
+   profile straight, and the thick section sets the extrusion speed for
+   the whole part. Thick metal near the neutral axis is a separate
+   concern with a separate check (5) -- this one is about making the part.
+
+   Three guards keep both halves honest.
+
+   * The measurement has to be of a *wall*: the circle's far contact must
+     land on a face within 30 degrees of parallel with the one it started
+     from (`eat.thickness`'s opposition angle). A circle sitting in a
+     corner or a rib junction touches a face square-on to its own, and its
+     diameter -- while a perfectly true width of material -- is not a wall
+     thickness in the sense this check is about. Without this, every
+     convex corner reads as a knife-edge (thickness genuinely goes to zero
+     at a sharp corner) and every junction reads as a heavy wall.
+   * A finding has to persist along the boundary: 2x the typical wall for
+     thin, 3x for thick. Thick readings bleed out of corners -- the
+     inscribed circle at the end of a wall, where it meets another wall,
+     is legitimately larger than either wall -- so the thick half needs
+     more persistence before it is describing a wall rather than a
+     junction.
+   * The whole check is skipped unless the typical wall is under a quarter
+     of the profile's smaller bounding-box dimension: a solid bar has no
+     walls, and its two dimensions aren't a uniformity problem.
+
+   Measured on the test profiles, wall-like thickness peaks at 1.14x
+   typical on the L-angle and the bad box, 1.41x on the filleted tube and
+   1.95x on the KJN (a real profile, in production) -- and none of them
+   has a single millimetre of qualifying boundary above 2.0x. The
+   deliberately heavy-walled fixture peaks at 2.53x with 57mm of it, and
+   an 8mm-on-4mm wall sitting exactly at the 2:1 practice limit stays
+   quiet. So the separation here is not a knife-edge on the ratio; it is
+   0mm versus 57mm of run against a 12mm bar.
 
 2. Sharp internal corners. A re-entrant (material-concave) vertex is a
    stress riser and an awkward die feature. Flagged when the open-side
@@ -59,17 +78,99 @@ What's checked, and why each threshold:
    -- the 20x40 T-slot fixture has 28 sharp internal corners, every one
    of them a slot mouth, lip tip or keyway that exists on purpose.
 
-   KNOWN LIMITATION (v1, accepted): that face-size filter intentionally
-   misses a narrow, deep notch cut into an otherwise clean wall, because
-   one face of a notch is short by definition even though the notch root
-   is a genuine stress riser. Accepted for v1 given how cleanly the filter
-   separates the tested cases on min-face/sqrt(area): KJN 0.12 (all 28
-   corners correctly dropped), bad-box 0.87 and L-angle 1.27 (both
-   correctly kept). The threshold sits in a 7x gap, so it isn't
-   knife-edge -- but anything that narrows that gap, notch detection
-   included, wants a rethink rather than a nudged constant.
+   That face-size filter cannot see a narrow, deep notch cut into an
+   otherwise clean wall, because one face of a notch is short by
+   definition however deep it goes. That is left exactly as it is -- the
+   filter separates the tested cases cleanly on min-face/sqrt(area) (KJN
+   0.12, all 28 corners correctly dropped; bad-box 0.87 and L-angle 1.27,
+   both correctly kept, a 7x gap around the threshold) and narrowing it
+   would wreck that. Notches are caught by check 3 instead, off a
+   different signal entirely.
 
-3. Material distribution vs. the bending axes. Raw Ixx/Iyy anisotropy is
+3. Notches that cut past the minimum wall. A slot cut into a wall is a
+   stress riser at its root and a fragile tongue in the die, and it is
+   invisible to both of the checks above: too short a run to be a thin
+   wall, too short a face to be a sharp corner. It is, however,
+   unmistakable in the thickness sweep. Walking the boundary across a
+   slot, the wall reads its full thickness, the slot's two side faces read
+   as corners and drop out, and the slot ROOT reads the metal left behind
+   it -- a wall-like reading, square to the far face, over only the root's
+   own width.
+
+   Finding that shape is easy. Deciding it is a MISTAKE is not, and that
+   governs how this check is scoped. A functional T-slot lip, a retention
+   hook root and an accidental slit are the same geometry; what separates
+   them is intent, which is not in the vertex data. Measured on the seven
+   real supplier drawings in the project root, a contrast-only test
+   (a local minimum at least 2x thinner than the wall either side,
+   recovering nearby on both sides) produces 67, 75, 15, 24 and 8
+   candidates on five of them -- every one a slot mouth, a hook root or a
+   web between two cells, all of them drawn on purpose. Five different
+   discriminators were tried against that and none separates: root width
+   vs depth (real slots reach aspect 17.8 against the test notch's 2.0),
+   root thickness vs the profile's own wall, the depth ratio itself
+   (a real slot sits at 2.94 against a threshold that would have to be 3),
+   how far the wall recovers, and whether the far face runs straight past
+   the cut (a real slot lip scores 2.10 against the test notch's 2.06).
+   They do not separate because there is nothing to separate: the shapes
+   are the same.
+
+   So this check does not try to guess intent. It asks a manufacturing
+   question instead, which the geometry CAN answer: does the notch cut
+   past what the profile can be made from? A root is flagged only when
+   what it leaves is under the ~1.0mm practical minimum wall -- the same
+   floor check 1 uses -- and it is otherwise identical to a thin-wall
+   finding except for being too short to persist. That is exactly the gap
+   check 1 leaves, and nothing more is claimed.
+
+   The contrast test is still required on top of the floor, because
+   without it the check would just be check 1 with the run guard removed
+   and would fire on every knife-edge and tip. A candidate must be at
+   least 2x thinner than the wall on BOTH sides, with that wall coming
+   back within 2.5 wall thicknesses of travel each way. Recovery on both
+   sides separates a cut from a step (metal that thins and stays thin is a
+   wall change, and has its own check). Requiring the recovery to be
+   nearby separates it from a long thin wall, and self-scales: a notch
+   cannot be deeper than the wall it is cut into, so root-to-full-wall is
+   bounded by roughly 1.5x that wall whatever size the profile is.
+
+   Measured: every constructed notch leaving under 1mm fires; the
+   thinnest notch-shaped candidate on any of the seven real drawings is
+   1.476mm, so all seven stay silent with 1.85x of margin, as do the KJN,
+   the L-angle, the bad box and both tubes.
+
+   KNOWN LIMITATION (accepted, and a real one): a slot that leaves 1.5mm
+   in a 4mm wall is a genuine stress riser and this will not report it,
+   because it is indistinguishable from the functional slots on every real
+   profile tested. Raising the sensitivity to catch it means 15-75
+   findings on a production drawing, which is worse than saying nothing.
+   Do not "fix" this by lowering the floor without new evidence that
+   separates designed slots from accidental ones -- five geometric
+   discriminators have already been tried and failed.
+
+   The measurement is local throughout -- the surrounding wall is whatever
+   is actually either side of the root, not the profile's median -- so
+   this check needs no walled-profile gate and will find a keyway cut in a
+   solid bar as readily as a slot in a 1.5mm extrusion.
+
+   The 30-degree opposition filter does useful double duty here. For a
+   V-notch it is a narrowness test in its own right: the root of a narrow
+   V faces the far wall almost square-on and reads, while a groove opened
+   out past about 60 degrees included stops reading -- which is right,
+   because by then it is a chamfer, not a notch.
+
+   DEDUPLICATION: a notch overlapping an emitted thin-wall finding is
+   suppressed. If the reduced section persists far enough to read as a
+   wall in its own right then the manufacturing problem dominates, the
+   thin-wall finding already names the same metal, and the fix it asks for
+   (thicken it) removes the stress riser too -- so the second finding adds
+   nothing actionable and costs a slot in a deliberately short list. The
+   two are nearly disjoint by construction anyway: a thin wall has to
+   persist over 2x the typical wall, a notch has to recover within 2.5x,
+   and only a feature in that narrow overlap can trip both -- a wide
+   flat-bottomed groove is the case that does, and the thin wall wins it.
+
+4. Material distribution vs. the bending axes. Raw Ixx/Iyy anisotropy is
    mostly just the envelope talking -- any profile in a 40x20 box is
    about 4x stiffer one way, and saying so isn't a suggestion. What *is*
    actionable is being more lopsided than the envelope requires, so the
@@ -77,7 +178,7 @@ What's checked, and why each threshold:
    rectangle of the same bounding box would have, and flagged only at
    1.5x off that.
 
-4. Material near the centroid. Area within the middle third of the
+5. Material near the centroid. Area within the middle third of the
    profile's depth contributes to bending in proportion to the square of
    its (small) distance from the neutral axis, so it's mass that isn't
    buying stiffness. Flagged when that band holds >= 25% of the area but
@@ -108,9 +209,18 @@ import math
 from dataclasses import dataclass, field
 from typing import Any
 
-from shapely.geometry import LineString, Point, Polygon, box
+from shapely.geometry import Polygon, box
 from shapely.geometry.polygon import orient
-from shapely.prepared import prep
+
+from eat.thickness import (
+    ThicknessSample,
+    normalized_rings,
+    ordered_by_ring,
+    sample_step,
+    sample_thickness,
+    wall_like as _wall_like,
+    weighted_median,
+)
 
 Vertex = tuple[float, float]
 
@@ -118,11 +228,16 @@ Vertex = tuple[float, float]
 
 MIN_PRACTICAL_WALL_MM = 1.0  # below this is hard to fill in 6xxx aluminium at any size
 THIN_WALL_FRACTION = 0.6  # flag walls under 60% of the profile's typical wall
+THICK_WALL_MULTIPLE = 2.0  # ...and over 200% of it. Extrusion practice puts the workable
+# thickness-variation limit within one profile at about 2:1; past that the die cannot be
+# balanced to fill the thin and thick sections at the same rate.
 THIN_WALLED_PROFILE_FRACTION = 0.25  # typical wall must be under this share of the smaller
 # bounding-box dimension for wall-uniformity analysis to mean anything at all: a solid bar's
 # "wall" is its own width, and comparing its two dimensions to each other says nothing.
-WALL_RUN_THICKNESS_MULTIPLE = 2.0  # a finding must persist this far along the boundary; below
-# that it's a corner or rib junction the ray happened to sample, not a wall
+WALL_RUN_THICKNESS_MULTIPLE = 2.0  # a thin finding must persist this far along the boundary;
+# below that it's a corner or rib junction, not a wall
+THICK_RUN_THICKNESS_MULTIPLE = 3.0  # ...and a thick one this far, because a thick reading
+# bleeds out of every corner (the circle where two walls meet is bigger than either wall)
 SHARP_CORNER_MAX_OPEN_ANGLE_DEG = 100.0  # <= this on the open side is a sharp internal corner
 SHARP_CORNER_MIN_FACE_FRACTION = 0.20  # both faces meeting at the corner must be at least this
 # share of sqrt(section area), so the corner joins two primary faces rather than a functional
@@ -132,6 +247,22 @@ SHARP_CORNER_MIN_FACE_FRACTION = 0.20  # both faces meeting at the corner must b
 # otherwise clean wall, since one face of a notch is short however deep it goes. See the
 # module docstring; catching those needs a different test, not a smaller number here.
 MIN_CORNER_EDGE_MM = 0.3  # shorter neighbours than this means arc-approximation noise
+NOTCH_DEPTH_RATIO = 2.0  # the wall either side of a notch root must be at least this many times
+# it, which is what makes the reading a cut rather than a wall. Not the check's sensitivity knob:
+# that is MIN_PRACTICAL_WALL_MM, shared with check 1, and the docstring explains at length why a
+# contrast threshold cannot be the thing that decides. Two is where ordinary wall-to-wall
+# variation stops -- check 1 shows it topping out at 1.4x on a clean profile, 1.95x on a real one.
+NOTCH_REACH_MULTIPLE = 2.5  # ...and must come back within this many of ITS OWN thicknesses of
+# boundary, on both sides. A notch cannot be deeper than the wall it is cut into, so the travel
+# from root to full wall is ~1.5x that wall however big the profile is; 2.5x leaves margin
+# without admitting a long thin wall, which recovers only at its far end.
+NOTCH_MIN_DEPTH_MM = 0.5  # below half a millimetre of metal removed it is drawing tolerance and
+# arc-approximation noise, not a feature anyone cut on purpose
+NOTCH_SAME_FEATURE_MULTIPLE = 1.0  # two notch readings closer together than the wall they are cut
+# into are one feature. Usually that is one slot read twice: once at its own root, and once from
+# the face opposite, whose inscribed circle the slot also pinches from the side. Two real cuts
+# that close together are one problem as well -- the metal between them is what fails.
+MAX_NOTCH_FINDINGS = 2  # they cluster; naming the two worst is enough to act on
 ANISOTROPY_ENVELOPE_FACTOR = 1.5  # how much worse than the envelope before it's worth saying
 CORE_AREA_FRACTION = 0.25  # band must hold at least this share of the area
 CORE_INERTIA_FRACTION = 0.10  # ...while contributing no more than this share of I
@@ -142,7 +273,14 @@ CORE_WALL_MULTIPLE = 1.5  # ...or, for a walled profile, the band must be this m
 MAX_SUGGESTIONS = 6  # keep the list short enough to actually read
 
 # Emitted in this order, most manufacturing-critical first.
-_KIND_ORDER = ["thin_wall", "sharp_corner", "material_distribution", "core_material"]
+_KIND_ORDER = [
+    "thin_wall",
+    "thick_wall",
+    "narrow_notch",
+    "sharp_corner",
+    "material_distribution",
+    "core_material",
+]
 
 
 @dataclass
@@ -206,7 +344,7 @@ def _raw_moments(rings: list[tuple[str, list[Vertex]]]) -> tuple[float, float, f
 def polygon_moments(vertices: list[Vertex], holes: list[list[Vertex]] | None = None) -> SectionMoments:
     """Area, centroid and centroidal Ixx/Iyy, exactly, straight from the
     polygon -- no meshing. Matches eat.section's FE values (verified)."""
-    rings = _normalized_rings(vertices, holes)
+    rings = normalized_rings(vertices, holes)
     a, sx, sy, ixx_o, iyy_o = _raw_moments(rings)
     if a <= 0:
         raise ValueError("Profile has zero or negative area")
@@ -257,21 +395,6 @@ def _geometry_moments(geom) -> tuple[float, float, float, float, float]:
 # --- Geometry setup ---------------------------------------------------------
 
 
-def _normalized_rings(
-    vertices: list[Vertex], holes: list[list[Vertex]] | None
-) -> list[tuple[str, list[Vertex]]]:
-    """Rings as (label, coords) with the outer boundary CCW and every hole
-    CW -- the same convention eat.section._build_geometry normalizes to.
-    With that winding, the material always lies to the LEFT of the
-    direction of travel, on every ring, which is what the wall-thickness
-    and corner checks below rely on."""
-    poly = orient(Polygon(vertices, holes or None), sign=1.0)
-    rings: list[tuple[str, list[Vertex]]] = [("outer", list(poly.exterior.coords)[:-1])]
-    for i, interior in enumerate(poly.interiors):
-        rings.append((f"hole {i + 1}", list(interior.coords)[:-1]))
-    return rings
-
-
 def _build_polygon(vertices: list[Vertex], holes: list[list[Vertex]] | None) -> Polygon:
     return orient(Polygon(vertices, holes or None), sign=1.0)
 
@@ -287,119 +410,14 @@ def _pt(p: Vertex) -> str:
 # --- Check 1: wall thickness ------------------------------------------------
 
 
-@dataclass
-class WallSample:
-    """One thickness measurement, taken at a point on the boundary."""
-
-    ring: str
-    index: int  # index of the edge's first vertex within its ring
-    point: Vertex  # where on the boundary it was measured
-    run: float  # how much boundary length this sample stands for
-    thickness: float
-    centre: Vertex  # midpoint of the measured through-thickness segment
-
-
-def _flatten_points(geom) -> list[Vertex]:
-    if geom.is_empty:
-        return []
-    kind = geom.geom_type
-    if kind == "Point":
-        return [(geom.x, geom.y)]
-    if kind in ("LineString", "LinearRing"):
-        return list(geom.coords)
-    if kind == "Polygon":
-        return list(geom.exterior.coords)
-    if kind in ("MultiPoint", "MultiLineString", "MultiPolygon", "GeometryCollection"):
-        out: list[Vertex] = []
-        for part in geom.geoms:
-            out.extend(_flatten_points(part))
-        return out
-    return []
-
-
-def _wall_samples(poly: Polygon, rings: list[tuple[str, list[Vertex]]]) -> list[WallSample]:
-    """Local wall thickness sampled along the whole boundary, by casting a
-    ray into the material and taking the first boundary it meets.
-
-    Sampled at intervals rather than once per edge because a single
-    midpoint sample on a long face is easily unrepresentative -- on a
-    box section with an internal rib, the one ray from the middle of the
-    bottom face runs straight up the rib and reads the full height of the
-    part. Dense sampling lets `_cluster_samples` tell that kind of
-    one-off reading (a few mm of boundary) from a real wall (tens of mm).
-    """
-    minx, miny, maxx, maxy = poly.bounds
-    span = math.hypot(maxx - minx, maxy - miny)
-    step = max(0.4, span / 300.0)
-    boundary = poly.boundary
-    inside = prep(poly)
-    eps = span * 1e-7
-    samples: list[WallSample] = []
-
-    for ring_label, coords in rings:
-        n = len(coords)
-        for i in range(n):
-            x0, y0 = coords[i]
-            x1, y1 = coords[(i + 1) % n]
-            dx, dy = x1 - x0, y1 - y0
-            length = math.hypot(dx, dy)
-            if length < eps:
-                continue
-            ux, uy = dx / length, dy / length
-            nx, ny = -uy, ux  # left normal: into the material for both windings
-            count = max(1, min(60, int(round(length / step))))
-            run = length / count
-            for j in range(count):
-                f = (j + 0.5) / count
-                px, py = x0 + dx * f, y0 + dy * f
-                start = (px + nx * eps, py + ny * eps)
-                if not inside.contains(Point(start)):
-                    continue  # sliver or unexpected winding -- don't guess
-                ray = LineString([start, (px + nx * span * 1.5, py + ny * span * 1.5)])
-                hits = _flatten_points(ray.intersection(boundary))
-                distances = [
-                    math.hypot(hx - px, hy - py)
-                    for hx, hy in hits
-                    if math.hypot(hx - px, hy - py) > eps * 10
-                ]
-                if not distances:
-                    continue
-                thickness = min(distances)
-                samples.append(
-                    WallSample(
-                        ring=ring_label,
-                        index=i,
-                        point=(px, py),
-                        run=run,
-                        thickness=thickness,
-                        centre=(px + nx * thickness / 2.0, py + ny * thickness / 2.0),
-                    )
-                )
-    return samples
-
-
-def _weighted_median(values: list[float], weights: list[float]) -> float:
-    """Median weighted by wall length -- the thickness of the typical
-    millimetre of wall, rather than of the typical face, so a profile
-    isn't skewed by a handful of short faces."""
-    order = sorted(range(len(values)), key=lambda i: values[i])
-    total = sum(weights)
-    running = 0.0
-    for i in order:
-        running += weights[i]
-        if running >= total / 2.0:
-            return values[i]
-    return values[order[-1]]
-
-
-def _cluster_samples(samples: list[WallSample], step: float) -> list[list[WallSample]]:
+def _cluster_samples(samples: list[ThicknessSample], step: float) -> list[list[ThicknessSample]]:
     """Group flagged samples that describe the same physical wall.
 
     Clustering is on the midpoint of each measured through-thickness
     segment, not on the boundary point, which means the two faces of one
     wall land on the same centre-line and merge into a single finding
     instead of being reported once from each side."""
-    clusters: list[list[WallSample]] = []
+    clusters: list[list[ThicknessSample]] = []
     centres: list[list[Vertex]] = []
     for sample in samples:
         tol = max(2.0 * step, 0.6 * sample.thickness)
@@ -419,31 +437,63 @@ def _cluster_samples(samples: list[WallSample], step: float) -> list[list[WallSa
     return clusters
 
 
-def _cluster_run(cluster: list[WallSample]) -> float:
-    """Boundary length this finding spans, counted per ring so that a wall
-    measured from both of its faces isn't double-counted."""
+def _ring_runs(cluster: list[ThicknessSample]) -> dict[str, float]:
     per_ring: dict[str, float] = {}
     for sample in cluster:
         per_ring[sample.ring] = per_ring.get(sample.ring, 0.0) + sample.run
-    return max(per_ring.values())
+    return per_ring
+
+
+def _cluster_run(cluster: list[ThicknessSample]) -> float:
+    """Boundary length this finding spans, counted per ring so that a wall
+    measured from both of its faces isn't double-counted."""
+    return max(_ring_runs(cluster).values())
+
+
+def _representative(cluster: list[ThicknessSample]) -> ThicknessSample:
+    """The sample a thick finding should quote and point at: the
+    length-weighted median thickness, at the middle of the stretch that
+    reads it, on whichever face contributes most of the run.
+
+    The thin half of the check quotes its extreme instead, and the
+    asymmetry is deliberate. The thinnest point of a thin wall is the
+    design fact -- that is where it stops filling. The thickest point of a
+    thick wall usually isn't: thickness rises at the ends of any wall,
+    where the inscribed circle starts to see around the corner into the
+    wall it joins, so the extreme overstates the wall by whatever its
+    corner radii happen to be and points at a corner rather than at the
+    offending face. The median is the thickness someone would measure with
+    a caliper."""
+    ring = max(_ring_runs(cluster).items(), key=lambda kv: kv[1])[0]
+    on_ring = [s for s in cluster if s.ring == ring] or cluster
+    median = weighted_median([s.thickness for s in on_ring], [s.run for s in on_ring])
+    at_median = [
+        s for s in on_ring if abs(s.thickness - median) <= 1e-9 * max(median, 1.0)
+    ] or on_ring
+    at_median.sort(key=lambda s: s.s)
+    return at_median[len(at_median) // 2]
 
 
 def _wall_thickness_suggestions(
-    samples: list[WallSample], typical: float, step: float
+    samples: list[ThicknessSample], typical: float, step: float
 ) -> list[Suggestion]:
-    if typical <= 0 or len(samples) < 2:
+    """Both halves of wall uniformity, off one sweep: walls too thin to
+    fill, and walls too thick for the die to stay balanced around them.
+    Only wall-like samples take part -- see `_wall_like`."""
+    walls = _wall_like(samples)
+    if typical <= 0 or len(walls) < 2:
         return []
-    min_run = WALL_RUN_THICKNESS_MULTIPLE * typical
-
-    thin = [
-        s
-        for s in samples
-        if s.thickness < THIN_WALL_FRACTION * typical or s.thickness < MIN_PRACTICAL_WALL_MM
-    ]
 
     suggestions: list[Suggestion] = []
 
-    thin_clusters = [c for c in _cluster_samples(thin, step) if _cluster_run(c) >= min_run]
+    # --- too thin ---
+    thin = [
+        s
+        for s in walls
+        if s.thickness < THIN_WALL_FRACTION * typical or s.thickness < MIN_PRACTICAL_WALL_MM
+    ]
+    thin_min_run = WALL_RUN_THICKNESS_MULTIPLE * typical
+    thin_clusters = [c for c in _cluster_samples(thin, step) if _cluster_run(c) >= thin_min_run]
     thin_clusters.sort(key=lambda c: min(s.thickness for s in c))
     for cluster in thin_clusters[:2]:
         worst = min(cluster, key=lambda s: s.thickness)
@@ -467,6 +517,40 @@ def _wall_thickness_suggestions(
                 kind="thin_wall",
                 title=f"Thin wall — {_fmt(worst.thickness, 2)} mm near {_pt(worst.point)}",
                 detail=detail,
+                ring=worst.ring,
+                vertex_indices=sorted({s.index for s in cluster if s.ring == worst.ring}),
+                points=[worst.point],
+                polylines=[[s.point for s in cluster if s.ring == worst.ring]],
+            )
+        )
+
+    # --- too thick ---
+    thick = [s for s in walls if s.thickness > THICK_WALL_MULTIPLE * typical]
+    thick_min_run = THICK_RUN_THICKNESS_MULTIPLE * typical
+    thick_clusters = [c for c in _cluster_samples(thick, step) if _cluster_run(c) >= thick_min_run]
+    thick_clusters.sort(key=lambda c: -max(s.thickness for s in c))
+    for cluster in thick_clusters[:2]:
+        worst = _representative(cluster)
+        run = _cluster_run(cluster)
+        ratio = worst.thickness / typical
+        suggestions.append(
+            Suggestion(
+                kind="thick_wall",
+                title=f"Heavy wall — {_fmt(worst.thickness, 2)} mm near {_pt(worst.point)}, {ratio:.1f}x the typical wall",
+                detail=(
+                    f"The wall here measures {_fmt(worst.thickness, 2)} mm through the section "
+                    f"over about {_fmt(run, 1)} mm of boundary, against {_fmt(typical, 2)} mm for "
+                    f"the profile's typical wall — {ratio:.1f}x. Thickness variation much beyond "
+                    "2:1 within one profile is hard to extrude well: metal moves faster through "
+                    "the thick section and the thin ones fill and freeze first, so the die has to "
+                    "be worked to balance it and the profile still tends to come out bowed or "
+                    "twisted. The thick section also dictates the quench rate and the extrusion "
+                    "speed for the whole part, and pulls in as it cools. If the metal is there "
+                    "for strength, a rib or a pair of thinner walls usually buys more stiffness "
+                    f"per kilo; if it isn't, taking it down toward {_fmt(typical, 2)} mm is free "
+                    "weight and cycle time. Where it has to change, taper into it rather than "
+                    "stepping."
+                ),
                 ring=worst.ring,
                 vertex_indices=sorted({s.index for s in cluster if s.ring == worst.ring}),
                 points=[worst.point],
@@ -547,7 +631,149 @@ def _sharp_corner_suggestions(
     ]
 
 
-# --- Check 3: material distribution vs. the bending axes --------------------
+# --- Check 3: narrow deep notches -------------------------------------------
+
+
+def _wall_samples_by_ring(samples: list[ThicknessSample]) -> dict[str, list[ThicknessSample]]:
+    """Wall-like samples grouped by ring and put in boundary order.
+    Corner samples are dropped before ordering, which is what lets the
+    walk step straight over a notch's two side faces (both of which read
+    as corners) and land on the wall the notch is cut into."""
+    return ordered_by_ring(_wall_like(samples))
+
+
+def _walk_to_recovery(
+    ordered: list[ThicknessSample], start: int, need: float, give_up: float, direction: int
+) -> tuple[ThicknessSample | None, float]:
+    """Walk one way around the ring from `ordered[start]` until the wall
+    comes back up to `need`, returning that sample and how far along the
+    boundary it was. Gives up past `give_up`: a wall that only recovers a
+    long way off was never notched, it just gets thinner."""
+    count = len(ordered)
+    ring_length = ordered[start].ring_length
+    origin = ordered[start].s
+    for k in range(1, count):
+        sample = ordered[(start + direction * k) % count]
+        gap = (
+            (sample.s - origin) % ring_length
+            if direction > 0
+            else (origin - sample.s) % ring_length
+        )
+        if gap > give_up:
+            return None, gap
+        if sample.thickness >= need:
+            return sample, gap
+    return None, float("inf")
+
+
+def _notch_suggestions(
+    samples: list[ThicknessSample], step: float, already_reported: list[Suggestion]
+) -> list[Suggestion]:
+    """Slots cut into a wall, found as local minima of the thickness sweep
+    that recover to a much thicker wall on both sides within a short
+    distance. See the module docstring for why those two conditions are
+    the whole test, and for the deduplication rule applied at the end."""
+    surrounding_by_sample: dict[ThicknessSample, float] = {}
+
+    for ordered in _wall_samples_by_ring(samples).values():
+        if len(ordered) < 3:
+            continue
+        thickest = max(s.thickness for s in ordered)
+        give_up = NOTCH_REACH_MULTIPLE * thickest  # nothing can recover further than this
+        for i, sample in enumerate(ordered):
+            if sample.thickness >= MIN_PRACTICAL_WALL_MM:
+                continue  # what it leaves is still a manufacturable wall -- see the docstring
+            need = NOTCH_DEPTH_RATIO * sample.thickness
+            if need > thickest:
+                continue  # no wall on this ring is thick enough for this to be a notch in
+            ahead, gap_ahead = _walk_to_recovery(ordered, i, need, give_up, +1)
+            if ahead is None:
+                continue
+            behind, gap_behind = _walk_to_recovery(ordered, i, need, give_up, -1)
+            if behind is None:
+                continue  # recovers on one side only: a step in the wall, not a cut into it
+            surrounding = min(ahead.thickness, behind.thickness)
+            if max(gap_ahead, gap_behind) > NOTCH_REACH_MULTIPLE * surrounding:
+                continue  # too far back to full wall: a thinning, not a notch
+            if surrounding - sample.thickness < NOTCH_MIN_DEPTH_MM:
+                continue
+            surrounding_by_sample[sample] = surrounding
+
+    if not surrounding_by_sample:
+        return []
+
+    # One finding per notch, not one per sample across its root.
+    clusters = _cluster_samples(list(surrounding_by_sample), step)
+    clusters.sort(key=lambda c: min(s.thickness for s in c))
+
+    claimed: list[Vertex] = []
+    for other in already_reported:
+        for line in other.polylines:
+            claimed.extend(line)
+        claimed.extend(other.points)
+
+    suggestions: list[Suggestion] = []
+    emitted: list[tuple[Vertex, float]] = []  # (root point, surrounding wall)
+    for cluster in clusters:
+        root = min(cluster, key=lambda s: s.thickness)
+        surrounding = surrounding_by_sample[root]
+        depth = surrounding - root.thickness
+        width = _cluster_run(cluster)
+
+        # DEDUPLICATION (see module docstring): if this metal has already
+        # been reported as a thin wall, that finding covers it. Both
+        # tolerances scale with the wall the notch is cut into, not with
+        # what is left at its root -- the feature's size is the wall's.
+        tol = max(2.0 * step, surrounding)
+        if any(math.hypot(cx - root.point[0], cy - root.point[1]) <= tol for cx, cy in claimed):
+            continue
+        # ...and the same notch read from the far side of the wall is not
+        # a second notch. Clusters arrive deepest-first, so the reading
+        # kept is the one at the actual root.
+        if any(
+            math.hypot(px - root.point[0], py - root.point[1])
+            <= NOTCH_SAME_FEATURE_MULTIPLE * max(surrounding, other_wall)
+            for (px, py), other_wall in emitted
+        ):
+            continue
+        emitted.append((root.point, surrounding))
+        suggestions.append(
+            Suggestion(
+                kind="narrow_notch",
+                title=(
+                    f"Narrow notch — {_fmt(depth, 2)} mm deep at {_pt(root.point)}, "
+                    f"leaving {_fmt(root.thickness, 2)} mm of a {_fmt(surrounding, 2)} mm wall"
+                ),
+                detail=(
+                    f"The wall reads {_fmt(surrounding, 2)} mm either side of this and "
+                    f"{_fmt(root.thickness, 2)} mm at the root, over about {_fmt(width, 2)} mm of "
+                    f"boundary — a cut {_fmt(depth, 2)} mm deep taking "
+                    f"{depth / surrounding:.0%} of the wall, over too short a stretch for the "
+                    "wall-thickness check to see it and between faces too short for the corner "
+                    f"check. What it leaves is under the ~{_fmt(MIN_PRACTICAL_WALL_MM, 1)} mm "
+                    "practical minimum wall for extruded aluminium, so this is not just a thin "
+                    "spot: it may not fill reliably at all, and the matching feature in the die is "
+                    "a thin tongue standing proud into the flow, which wears fast and chips. It is "
+                    "a stress riser on top of that — the root concentrates stress the way an "
+                    "unfilleted corner does, and the metal behind it carries the full wall's load "
+                    "through a fraction of the section. If the slot is functional, take it back to "
+                    f"leave at least {_fmt(MIN_PRACTICAL_WALL_MM, 1)} mm and put the largest radius "
+                    "you can in its root — even 0.3-0.5 mm transforms the stress concentration. If "
+                    "it isn't functional, it is the cheapest thing on the profile to delete."
+                ),
+                ring=root.ring,
+                vertex_indices=sorted({s.index for s in cluster if s.ring == root.ring}),
+                points=[root.point],
+                polylines=[[s.point for s in cluster if s.ring == root.ring]],
+            )
+        )
+        if len(suggestions) >= MAX_NOTCH_FINDINGS:
+            break
+
+    return suggestions
+
+
+# --- Check 4: material distribution vs. the bending axes --------------------
 
 
 def _distribution_suggestions(moments: SectionMoments, poly: Polygon) -> list[Suggestion]:
@@ -604,7 +830,7 @@ def _distribution_suggestions(moments: SectionMoments, poly: Polygon) -> list[Su
     ]
 
 
-# --- Check 4: material near the centroid ------------------------------------
+# --- Check 5: material near the centroid ------------------------------------
 
 
 def _max_inscribed_radius(geom, upper_bound: float) -> float:
@@ -729,27 +955,32 @@ def generate_suggestions(
     poly = _build_polygon(vertices, holes)
     if not poly.is_valid:
         raise ValueError("Profile polygon is self-intersecting or otherwise invalid")
-    rings = _normalized_rings(vertices, holes)
+    rings = normalized_rings(vertices, holes)
     moments = polygon_moments(vertices, holes)
 
     minx, miny, maxx, maxy = poly.bounds
-    span = math.hypot(maxx - minx, maxy - miny)
-    step = max(0.4, span / 300.0)
-    samples = _wall_samples(poly, rings)
+    step = sample_step(poly)
+    samples = sample_thickness(poly, rings)
 
-    # A "typical wall" only means something on a walled profile. On a solid
-    # bar the measurement just returns the bar's own dimensions, and
+    # A "typical wall" only means something on a walled profile, and it is
+    # measured over the samples that are actually crossing a wall. On a
+    # solid bar the measurement just returns the bar's own dimensions, and
     # comparing those to each other would flag the long axis of every plain
     # rectangle as a heavy wall.
     typical_wall: float | None = None
-    if samples:
-        candidate = _weighted_median([s.thickness for s in samples], [s.run for s in samples])
+    walls = _wall_like(samples)
+    if walls:
+        candidate = weighted_median([s.thickness for s in walls], [s.run for s in walls])
         if 0 < candidate < THIN_WALLED_PROFILE_FRACTION * min(maxx - minx, maxy - miny):
             typical_wall = candidate
 
     suggestions: list[Suggestion] = []
     if typical_wall is not None:
         suggestions += _wall_thickness_suggestions(samples, typical_wall, step)
+    # The notch check is deliberately not gated on `typical_wall`: it reads
+    # the wall either side of each candidate rather than the profile's
+    # median, so it means something on a solid bar too.
+    suggestions += _notch_suggestions(samples, step, suggestions)
     suggestions += _sharp_corner_suggestions(rings, moments.area)
     suggestions += _distribution_suggestions(moments, poly)
     suggestions += _core_material_suggestions(moments, poly, typical_wall)
