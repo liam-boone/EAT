@@ -165,7 +165,8 @@ class BeamResult:
             f"Max deflection      = {self.max_deflection:,.6g} mm  at x = {self.max_deflection_position:,.4f} mm",
             f"Effective length K  = {self.effective_length_factor}",
             f"Euler buckling load = {self.euler_buckling_load:,.6g} N",
-            f"Axial load (Z, along length) = {self.axial_load if self.axial_load is not None else 'n/a'}",
+            f"Axial load (Z, along length) = "
+            + (f"{self.axial_load:,.6g} N" if self.axial_load is not None else "n/a"),
             f"Buckling safety fac.= {self.buckling_safety_factor if self.buckling_safety_factor is not None else 'n/a (no axial load given)'}",
         ]
         return "\n".join(lines)

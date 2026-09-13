@@ -50,6 +50,8 @@ from pydantic import BaseModel, Field, model_validator
 from eat import baseline, history, suggestions
 from eat.beam import BeamResult, BoundaryCondition, PointLoad, analyze_beam
 from eat.dxf_io import DxfImportError, export_polygon_to_text, import_polygon_from_bytes
+from eat.pdf_io import PdfImportError, _fmt_scale
+from eat.pdf_io import import_profile_from_bytes as import_pdf_profile_from_bytes
 from eat.materials import (
     add_material,
     delete_material,
@@ -116,14 +118,14 @@ class MaterialSpec(BaseModel):
 
 class MaterialResponse(BaseModel):
     name: str
-    E: float
-    nu: float
-    G: float
-    yield_strength: float | None
-    ultimate_strength: float | None
-    shear_strength: float | None
+    E: float = Field(description="Elastic modulus, MPa")
+    nu: float = Field(description="Poisson's ratio")
+    G: float = Field(description="Shear modulus, MPa")
+    yield_strength: float | None = Field(None, description="MPa")
+    ultimate_strength: float | None = Field(None, description="MPa")
+    shear_strength: float | None = Field(None, description="MPa")
     shear_strength_approximate: bool
-    density: float | None
+    density: float | None = Field(None, description="kg/m^3")
 
     @classmethod
     def from_material(cls, material: Material) -> "MaterialResponse":
@@ -134,14 +136,14 @@ class MaterialUpdateRequest(BaseModel):
     """PUT /materials/{name}: only fields provided (non-null) are changed."""
 
     name: str | None = None
-    E: float | None = None
-    nu: float | None = None
-    G: float | None = None
-    yield_strength: float | None = None
-    ultimate_strength: float | None = None
-    shear_strength: float | None = None
+    E: float | None = Field(None, description="Elastic modulus, MPa")
+    nu: float | None = Field(None, description="Poisson's ratio")
+    G: float | None = Field(None, description="Shear modulus, MPa")
+    yield_strength: float | None = Field(None, description="MPa")
+    ultimate_strength: float | None = Field(None, description="MPa")
+    shear_strength: float | None = Field(None, description="MPa")
     shear_strength_approximate: bool | None = None
-    density: float | None = None
+    density: float | None = Field(None, description="kg/m^3")
 
 
 def _resolve_material(material_name: str | None, material: MaterialSpec | None) -> Material:
@@ -166,7 +168,9 @@ class SectionRequest(BaseModel):
     )
     material_name: str | None = Field(None, description="Look up a material from materials.json")
     material: MaterialSpec | None = Field(None, description="...or supply one inline")
-    mesh_size: float | None = None
+    mesh_size: float | None = Field(
+        None, description="Target FE mesh triangle area, mm^2. Defaults to bbox area / 2000 if omitted."
+    )
     save_history: bool = Field(
         True,
         description="Log this analysis to run history. Set False for internal/derived lookups "
@@ -179,6 +183,38 @@ class DxfLoopInfo(BaseModel):
     vertex_count: int
     area: float = Field(description="mm^2")
     bbox: tuple[float, float, float, float] = Field(description="(minx, miny, maxx, maxy), mm")
+
+
+class PdfDimensionCheck(BaseModel):
+    text: str = Field(description="The callout as printed on the drawing, e.g. '24.0 ±0.15'")
+    stated: float = Field(description="Nominal value from the callout, mm")
+    measured: float = Field(description="Same dimension measured off the extracted geometry, mm")
+    error_pct: float = Field(description="(measured - stated) / stated, as a percentage")
+    agrees: bool
+
+
+class PdfImportInfo(BaseModel):
+    """How a PDF drawing was read — surfaced so the result can be judged
+    rather than taken on trust."""
+
+    page: int = Field(description="1-based page the profile was read from")
+    scale: str = Field(description="Drawing scale used, e.g. '2:1'")
+    scale_source: str = Field(description="Where that scale came from, and how it was confirmed")
+    length_mm: float | None = Field(description="Extrusion cut length read from the drawing, mm")
+    length_source: str
+    dimension_checks: list[PdfDimensionCheck] = Field(
+        default_factory=list,
+        description="Every dimension callout on the profile view, measured off the extracted "
+        "geometry and compared to its printed value. This is the check that the profile was "
+        "read at the right size.",
+    )
+    title_block: dict[str, str] = Field(default_factory=dict)
+    mass_check: str | None = Field(
+        None,
+        description="Advisory comparison of extracted area against the title block's stated "
+        "part weight; never gates the import",
+    )
+    warnings: list[str] = Field(default_factory=list)
 
 
 class SectionResponse(BaseModel):
@@ -202,29 +238,34 @@ class SectionResponse(BaseModel):
     dxf_outer_loop_index: int | None = Field(
         None, description="Index into dxf_loops that became `vertices` (null for non-DXF input)"
     )
+    pdf_import: PdfImportInfo | None = Field(
+        None,
+        description="How the profile was read off a PDF drawing, including the dimensional "
+        "self-check (null for non-PDF input)",
+    )
     material: str
-    area: float
-    perimeter: float
-    cx: float
-    cy: float
-    ixx: float
-    iyy: float
-    ixy: float
+    area: float = Field(description="mm^2")
+    perimeter: float = Field(description="mm")
+    cx: float = Field(description="Centroid x, mm")
+    cy: float = Field(description="Centroid y, mm")
+    ixx: float = Field(description="Second moment of area about the centroidal x-axis, mm^4")
+    iyy: float = Field(description="Second moment of area about the centroidal y-axis, mm^4")
+    ixy: float = Field(description="Product of area, mm^4")
     izz: float = Field(description="Polar moment about centroidal z-axis (= ixx + iyy), mm^4")
-    j: float
-    iw: float
-    x_sc: float
-    y_sc: float
-    zxx_plus: float
-    zxx_minus: float
-    zyy_plus: float
-    zyy_minus: float
-    sxx: float
-    syy: float
-    ea: float
-    ei_xx: float
-    ei_yy: float
-    gj: float
+    j: float = Field(description="St. Venant torsion constant, mm^4")
+    iw: float = Field(description="Warping constant, mm^6")
+    x_sc: float = Field(description="Shear centre x, mm")
+    y_sc: float = Field(description="Shear centre y, mm")
+    zxx_plus: float = Field(description="Elastic section modulus about x, +y fibre, mm^3")
+    zxx_minus: float = Field(description="Elastic section modulus about x, -y fibre, mm^3")
+    zyy_plus: float = Field(description="Elastic section modulus about y, +x fibre, mm^3")
+    zyy_minus: float = Field(description="Elastic section modulus about y, -x fibre, mm^3")
+    sxx: float = Field(description="Plastic section modulus about x, mm^3")
+    syy: float = Field(description="Plastic section modulus about y, mm^3")
+    ea: float = Field(description="Axial stiffness (E * Area), N")
+    ei_xx: float = Field(description="Bending stiffness about x (E * Ixx), N*mm^2")
+    ei_yy: float = Field(description="Bending stiffness about y (E * Iyy), N*mm^2")
+    gj: float = Field(description="Torsional stiffness (G * J), N*mm^2")
     mass_per_length: float | None = Field(description="kg/m; null if the material has no density")
 
     @classmethod
@@ -237,6 +278,7 @@ class SectionResponse(BaseModel):
         dxf_warnings: list[str] | None = None,
         dxf_loops: list[DxfLoopInfo] | None = None,
         dxf_outer_loop_index: int | None = None,
+        pdf_import: PdfImportInfo | None = None,
     ) -> "SectionResponse":
         return cls(
             section_id=section_id,
@@ -245,6 +287,7 @@ class SectionResponse(BaseModel):
             dxf_warnings=dxf_warnings or [],
             dxf_loops=dxf_loops,
             dxf_outer_loop_index=dxf_outer_loop_index,
+            pdf_import=pdf_import,
             **asdict(result),
         )
 
@@ -263,6 +306,7 @@ def _run_section_analysis(
     dxf_warnings: list[str] | None = None,
     dxf_loops: list[DxfLoopInfo] | None = None,
     dxf_outer_loop_index: int | None = None,
+    pdf_import: PdfImportInfo | None = None,
     save_history: bool = True,
 ) -> SectionResponse:
     try:
@@ -284,6 +328,7 @@ def _run_section_analysis(
         dxf_warnings,
         dxf_loops,
         dxf_outer_loop_index,
+        pdf_import,
     )
 
 
@@ -302,7 +347,7 @@ async def post_section_from_dxf(
     material_json: str | None = Form(
         None, description="JSON-encoded MaterialSpec, as an alternative to material_name"
     ),
-    mesh_size: float | None = Form(None),
+    mesh_size: float | None = Form(None, description="Target FE mesh triangle area, mm^2"),
 ) -> SectionResponse:
     material_spec = MaterialSpec.model_validate_json(material_json) if material_json else None
     material = _resolve_material(material_name, material_spec)
@@ -324,6 +369,68 @@ async def post_section_from_dxf(
         dxf_warnings=dxf_result.warnings,
         dxf_loops=dxf_loops,
         dxf_outer_loop_index=dxf_result.outer_loop_index,
+    )
+
+
+@app.post("/section/from-pdf", response_model=SectionResponse)
+async def post_section_from_pdf(
+    file: UploadFile = File(..., description="A vector PDF engineering drawing of the profile"),
+    material_name: str | None = Form(None),
+    material_json: str | None = Form(
+        None, description="JSON-encoded MaterialSpec, as an alternative to material_name"
+    ),
+    mesh_size: float | None = Form(None, description="Target FE mesh triangle area, mm^2"),
+    page: int | None = Form(
+        None,
+        description="1-based page to read the profile from. Omit to search every page; a "
+        "multi-page file must then yield exactly one readable profile.",
+    ),
+) -> SectionResponse:
+    """Read a profile (and its cut length) straight off a PDF drawing.
+
+    Refuses, with the reason, rather than returning a guess — see
+    `eat.pdf_io`. The dimensional self-check that justified the result comes
+    back in `pdf_import.dimension_checks`.
+    """
+    material_spec = MaterialSpec.model_validate_json(material_json) if material_json else None
+    material = _resolve_material(material_name, material_spec)
+
+    raw = await file.read()
+    try:
+        pdf_result = import_pdf_profile_from_bytes(
+            raw,
+            source_label=file.filename or "<uploaded file>",
+            page=(page - 1) if page else None,
+        )
+    except PdfImportError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    info = PdfImportInfo(
+        page=pdf_result.page_index + 1,
+        scale=_fmt_scale(pdf_result.scale),
+        scale_source=pdf_result.scale_source,
+        length_mm=pdf_result.length_mm,
+        length_source=pdf_result.length_source,
+        dimension_checks=[
+            PdfDimensionCheck(
+                text=c.text,
+                stated=c.stated,
+                measured=c.measured,
+                error_pct=c.error_pct,
+                agrees=c.agrees,
+            )
+            for c in pdf_result.dimension_checks
+        ],
+        title_block=pdf_result.title_block,
+        mass_check=pdf_result.mass_check.note if pdf_result.mass_check else None,
+        warnings=pdf_result.warnings,
+    )
+    return _run_section_analysis(
+        pdf_result.vertices,
+        material,
+        mesh_size,
+        holes=pdf_result.holes,
+        pdf_import=info,
     )
 
 
@@ -400,7 +507,7 @@ class PointLoadModel(BaseModel):
 class SectionInput(BaseModel):
     vertices: list[Vertex]
     holes: list[list[Vertex]] | None = None
-    mesh_size: float | None = None
+    mesh_size: float | None = Field(None, description="Target FE mesh triangle area, mm^2")
 
 
 class BeamRequest(BaseModel):
@@ -426,32 +533,34 @@ class BeamRequest(BaseModel):
 
 class ReactionResponse(BaseModel):
     label: str
-    x: float
-    force: float
-    moment: float
+    x: float = Field(description="Position along the beam, mm")
+    force: float = Field(description="N")
+    moment: float = Field(description="N*mm")
 
 
 class BeamResponse(BaseModel):
     boundary_condition: str
-    length: float
+    length: float = Field(description="mm")
     material: str
     reactions: list[ReactionResponse]
     load_axis: str = Field(description="'x' or 'y' -- which section axis the point loads bent about")
-    max_moment: float
-    max_moment_position: float
-    max_bending_stress: float
-    max_bending_stress_position: float
-    safety_factor: float | None
-    max_deflection: float
-    max_deflection_position: float
-    effective_length_factor: float
-    euler_buckling_load: float
-    axial_load: float | None
-    buckling_safety_factor: float | None
-    diagram_x: list[float]
-    moment_diagram: list[float]
-    bending_stress_diagram: list[float]
-    deflection_diagram: list[float]
+    max_moment: float = Field(description="N*mm, signed")
+    max_moment_position: float = Field(description="mm")
+    max_bending_stress: float = Field(description="MPa, magnitude (worst-case fibre)")
+    max_bending_stress_position: float = Field(description="mm")
+    safety_factor: float | None = Field(description="yield_strength / max_bending_stress; null if the material has no yield strength")
+    max_deflection: float = Field(description="mm, signed")
+    max_deflection_position: float = Field(description="mm")
+    effective_length_factor: float = Field(description="K, dimensionless")
+    euler_buckling_load: float = Field(description="N")
+    axial_load: float | None = Field(description="N, along the section's Z (long) axis; null if not supplied")
+    buckling_safety_factor: float | None = Field(
+        description="euler_buckling_load / axial_load; null if axial_load wasn't supplied"
+    )
+    diagram_x: list[float] = Field(description="Position along the beam, mm")
+    moment_diagram: list[float] = Field(description="N*mm, same length as diagram_x")
+    bending_stress_diagram: list[float] = Field(description="MPa (magnitude), same length as diagram_x")
+    deflection_diagram: list[float] = Field(description="mm, same length as diagram_x")
 
     @classmethod
     def from_result(cls, result: BeamResult) -> "BeamResponse":
@@ -529,7 +638,7 @@ class HistorySummaryResponse(BaseModel):
     id: str
     created_at: str
     material: str
-    area: float | None
+    area: float | None = Field(description="mm^2")
     has_holes: bool
     has_beam: bool
 
@@ -577,17 +686,17 @@ class BaselineResponse(BaseModel):
     source: Literal["builtin", "history"]
     name: str
     material: str
-    area: float
-    ixx: float
-    iyy: float
-    ea: float
-    ei_xx: float
-    ei_yy: float
-    zxx_plus: float
-    zxx_minus: float
-    zyy_plus: float
-    zyy_minus: float
-    mass_per_length: float | None
+    area: float = Field(description="mm^2")
+    ixx: float = Field(description="mm^4")
+    iyy: float = Field(description="mm^4")
+    ea: float = Field(description="Axial stiffness (E * Area), N")
+    ei_xx: float = Field(description="Bending stiffness about x (E * Ixx), N*mm^2")
+    ei_yy: float = Field(description="Bending stiffness about y (E * Iyy), N*mm^2")
+    zxx_plus: float = Field(description="Elastic section modulus about x, +y fibre, mm^3")
+    zxx_minus: float = Field(description="Elastic section modulus about x, -y fibre, mm^3")
+    zyy_plus: float = Field(description="Elastic section modulus about y, +x fibre, mm^3")
+    zyy_minus: float = Field(description="Elastic section modulus about y, -x fibre, mm^3")
+    mass_per_length: float | None = Field(description="kg/m; null if the material has no density")
     yield_strength: float | None = Field(
         None, description="MPa; null if the baseline's material has none, or no longer exists"
     )

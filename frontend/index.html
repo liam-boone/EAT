@@ -19,6 +19,8 @@
     <button type="button" class="btn btn--ghost" id="btn-open-history">History</button>
     <input type="file" id="dxf-file-input" accept=".dxf" hidden />
     <button type="button" class="btn btn--ghost" id="btn-import-dxf">Import DXF</button>
+    <input type="file" id="pdf-file-input" accept=".pdf" hidden />
+    <button type="button" class="btn btn--ghost" id="btn-import-pdf">Import PDF Drawing</button>
   </div>
 </header>
 
@@ -78,6 +80,22 @@
           <p class="hint">If the outer boundary were fully filled (holes ignored):</p>
           <dl class="result-grid" id="solid-fill-grid"></dl>
         </div>
+      </details>
+    </div>
+
+    <div id="pdf-import-section" class="pdf-import-section" hidden>
+      <details class="more-info">
+        <summary>Read from Drawing <span class="optional-tag" id="pdf-import-summary"></span></summary>
+        <dl class="result-grid" id="pdf-import-grid"></dl>
+        <h4 class="panel__subtitle panel__subtitle--sub">Dimension Check</h4>
+        <p class="hint">
+          Every dimension callout on the drawing's profile view, measured off the geometry that
+          was extracted. This is what confirms the profile was read at the right size &mdash; a
+          wrong scale would show up here as a consistent error.
+        </p>
+        <table class="dim-check-table" id="pdf-dim-table"></table>
+        <ul class="pdf-warning-list" id="pdf-warning-list"></ul>
+        <p class="hint" id="pdf-mass-check"></p>
       </details>
     </div>
 

@@ -19,6 +19,7 @@ needed at call sites:
 | EA (axial stiffness)                       | N |
 | EI, GJ (bending/torsional stiffness)       | N·mm² |
 | Density                                    | kg/m³ (metadata only — not used in stress/stiffness calcs, kept in its natural SI unit) |
+| Mesh size (`analyze_section`'s `mesh_size`)| mm² (target FE mesh triangle *area*, not a length — easy to misread) |
 
 ## Where conversion happens
 
@@ -28,6 +29,28 @@ converts Pa → MPa (divide by 1e6) when loading into an `eat.section.Material`,
 and MPa → Pa when saving back. This is the *only* place unit conversion
 happens; everything downstream (`eat.section`, `eat.beam`) assumes the
 mm-N-MPa system above and does no further conversion.
+
+`eat/materials.py`'s CLI (`python -m eat.materials add/edit`) is the one
+other deliberate exception: it accepts `--e-gpa`/`--g-gpa` in **GPa**, since
+that is the natural unit to type a modulus in at a keyboard, and its
+`list` table prints `E(GPa)`/`G(GPa)` columns for the same reason.
+Both the flag names and the table header say so explicitly; internally the
+values are converted to MPa immediately (`* 1000`) and stored as MPa/Pa
+like everything else — GPa never leaks past that CLI boundary.
+
+The one other place a value legitimately leaves the mm-N-MPa/kg system is
+`eat.pdf_io`'s advisory mass check (extracted area × length × density vs.
+a drawing's title-block weight): its `MassCheck.note` reports an implied
+density in **g/cm³**, the unit a material datasheet's density figure is
+usually quoted in and the one that keeps that one comparison's numbers in
+a readable range. It is explicitly labeled in the note text and is never
+fed back into any calculation — a self-contained, clearly-labeled
+exception, not a second convention.
+
+Every numeric field in the FastAPI response models (`eat/api.py`) carries
+its unit in the field's `description` (visible at `/docs`), even where the
+unit is "obviously" mm/N/MPa by the convention above — a schema is read on
+its own, without this file open next to it.
 
 ## Load direction convention (`eat.beam`)
 

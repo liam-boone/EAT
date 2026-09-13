@@ -907,3 +907,56 @@ dd.sf-good {
   stroke: var(--bg);
   stroke-width: 1.5;
 }
+
+/* ------------------------------------------------------------------
+   PDF drawing import — provenance and the dimensional self-check
+------------------------------------------------------------------ */
+
+.pdf-import-section {
+  margin-top: var(--space-3);
+}
+
+.dim-check-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+  margin-bottom: var(--space-3);
+}
+
+.dim-check-table th,
+.dim-check-table td {
+  text-align: left;
+  padding: 3px 8px 3px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.dim-check-table th {
+  font-weight: 600;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.dim-check-table td:nth-child(n + 2) {
+  font-variant-numeric: tabular-nums;
+}
+
+/* A dimension that does not reconcile is the one thing in this panel that
+   needs to catch the eye -- it means the profile may not have been read at
+   the size the drawing states. */
+.dim-check-table__row--off td {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.pdf-warning-list {
+  margin: 0 0 var(--space-2);
+  padding-left: 1.1rem;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+.pdf-warning-list li {
+  margin-bottom: var(--space-1);
+}

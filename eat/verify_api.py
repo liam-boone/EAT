@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import io
 from dataclasses import dataclass
+from pathlib import Path
 
 import ezdxf
 from ezdxf import units as ezdxf_units
@@ -282,6 +283,109 @@ def check_section_from_dxf() -> list[Check]:
 
 
 # --- /materials --------------------------------------------------------------
+
+
+# --- /section/from-pdf -------------------------------------------------------
+
+
+def check_section_from_pdf() -> list[Check]:
+    """HTTP wiring for PDF drawing import. The extraction itself (and whether
+    it reads the real supplier drawings correctly) is verified against those
+    drawings in eat/verify_pdf.py; this only checks the endpoint."""
+    checks: list[Check] = []
+    drawing = Path("B18 - Tower - Extrusion - Standard Light A (1).pdf")
+    if not drawing.exists():
+        checks.append(
+            Check(
+                "POST /section/from-pdf: reference drawing present",
+                False,
+                f"{drawing} not found in the project root",
+            )
+        )
+        return checks
+
+    with open(drawing, "rb") as f:
+        resp = client.post(
+            "/section/from-pdf",
+            files={"file": (drawing.name, f, "application/pdf")},
+            data={"material_name": "6063-T6 Aluminum (Extruded)"},
+        )
+    checks.append(Check("POST /section/from-pdf: 200 OK", resp.status_code == 200, resp.text[:200]))
+    if resp.status_code != 200:
+        return checks
+    body = resp.json()
+    info = body.get("pdf_import") or {}
+
+    checks.append(
+        Check(
+            "POST /section/from-pdf: reports the scale it read and how it was confirmed",
+            info.get("scale") == "2:1" and "confirmed by" in (info.get("scale_source") or ""),
+            f"{info.get('scale')} / {info.get('scale_source')}",
+        )
+    )
+    checks.append(
+        Check(
+            "POST /section/from-pdf: extrusion length comes back as 2500mm",
+            info.get("length_mm") is not None and abs(info["length_mm"] - 2500.0) < 0.5,
+            str(info.get("length_mm")),
+        )
+    )
+    dims = info.get("dimension_checks") or []
+    checks.append(
+        Check(
+            "POST /section/from-pdf: every dimension check agrees",
+            len(dims) >= 3 and all(d["agrees"] for d in dims),
+            f"{sum(1 for d in dims if d['agrees'])}/{len(dims)}",
+        )
+    )
+    checks.append(
+        Check(
+            "POST /section/from-pdf: title block is read",
+            (info.get("title_block") or {}).get("part_number") == "DEX05120096",
+            str((info.get("title_block") or {}).get("part_number")),
+        )
+    )
+    # The section engine must actually have run on the extracted geometry.
+    checks.append(
+        Check(
+            "POST /section/from-pdf: section properties computed from the extracted profile",
+            body["area"] > 0 and body["ixx"] > 0 and len(body["holes"]) == 4,
+            f"area={body['area']:.2f}, holes={len(body['holes'])}",
+        )
+    )
+
+    # Failure: a PDF that cannot be read confidently must 400 with the reason.
+    multi = Path("RDEX05120940 B18 - Tower - Section 1 Spine - XL_Rev 2.pdf")
+    if multi.exists():
+        with open(multi, "rb") as f:
+            resp = client.post(
+                "/section/from-pdf",
+                files={"file": (multi.name, f, "application/pdf")},
+                data={"material_name": "6063-T6 Aluminum (Extruded)"},
+            )
+        checks.append(
+            Check(
+                "POST /section/from-pdf: unreadable drawing -> 400 explaining why, not a guess",
+                resp.status_code == 400
+                and "closes into loops" in resp.json()["detail"],
+                resp.text[:160],
+            )
+        )
+
+    # Failure: not a PDF at all.
+    resp = client.post(
+        "/section/from-pdf",
+        files={"file": ("garbage.txt", io.BytesIO(b"not a pdf file"), "text/plain")},
+        data={"material_name": "6061-T6 Aluminum (Extruded)"},
+    )
+    checks.append(
+        Check(
+            "POST /section/from-pdf: non-PDF content -> 400 with clean message",
+            resp.status_code == 400 and "is not a PDF file" in resp.json()["detail"],
+            resp.text[:160],
+        )
+    )
+    return checks
 
 
 def check_materials() -> list[Check]:
@@ -773,6 +877,7 @@ def main() -> int:
     all_checks = (
         section_checks
         + check_section_from_dxf()
+        + check_section_from_pdf()
         + check_materials()
         + check_beam(rectangle_section_id)
         + check_history()

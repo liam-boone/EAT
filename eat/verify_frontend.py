@@ -226,6 +226,7 @@ def main() -> int:
                 # check below (endswith).
                 for key in (
                     "/section/from-dxf",
+                    "/section/from-pdf",
                     "/section/to-dxf",
                     "/baseline",
                     "/section",
@@ -468,6 +469,110 @@ def main() -> int:
                     page.locator("#btn-close-loop").is_disabled() and not page.locator("#btn-export-dxf").is_disabled(),
                 )
             )
+
+            # --- Flow 2b: PDF drawing import ---
+            # The extraction itself is verified against the real supplier
+            # drawings in eat/verify_pdf.py (including overlays rendered
+            # back onto the sheets). What matters here is the wiring: the
+            # profile reaches the canvas, the provenance panel renders, and
+            # the length the drawing states prefills the beam input.
+            drawing = PROJECT_ROOT / "B18 - Tower - Extrusion - Standard Light A (1).pdf"
+            if drawing.exists():
+                page.click("#btn-clear")
+                captured.pop("/section/from-pdf", None)
+                # Clearing the sketch hides the beam panel, so #input-length
+                # isn't fillable through the UI here -- set it directly. It
+                # must start empty for the prefill-on-empty behaviour under
+                # test to be exercised at all.
+                page.evaluate("document.getElementById('input-length').value = ''")
+                page.set_input_files("#pdf-file-input", str(drawing))
+                page.wait_for_selector("#pdf-import-section:not([hidden])", state="attached", timeout=15000)
+
+                pdf_resp = captured.get("/section/from-pdf")
+                checks.append(Check("PDF import flow: POST /section/from-pdf captured", pdf_resp is not None))
+                if pdf_resp:
+                    info = pdf_resp.get("pdf_import") or {}
+                    checks.append(
+                        Check(
+                            "PDF import flow: 4 holes extracted and echoed back",
+                            len(pdf_resp.get("holes", [])) == 4,
+                            f"{len(pdf_resp.get('holes', []))} holes",
+                        )
+                    )
+                    checks.append(
+                        Check(
+                            "PDF import flow: scale reported as 2:1 with every dimension confirmed",
+                            info.get("scale") == "2:1"
+                            and bool(info.get("dimension_checks"))
+                            and all(d["agrees"] for d in info["dimension_checks"]),
+                            f"{info.get('scale')}, "
+                            f"{sum(1 for d in info.get('dimension_checks', []) if d['agrees'])}"
+                            f"/{len(info.get('dimension_checks', []))}",
+                        )
+                    )
+
+                # The dimension-check table is the panel's whole point --
+                # confirm it actually rendered rows, not just that the
+                # section un-hid.
+                dim_rows = page.locator("#pdf-dim-table tr").count()
+                checks.append(
+                    Check(
+                        "PDF import flow: dimension-check table rendered (header + one row per callout)",
+                        dim_rows >= 4,
+                        f"{dim_rows} rows",
+                    )
+                )
+                length_value = page.input_value("#input-length")
+                checks.append(
+                    Check(
+                        "PDF import flow: beam length prefilled from the drawing's 2500mm callout",
+                        length_value == "2500",
+                        f"input-length={length_value!r}",
+                    )
+                )
+                checks.append(
+                    Check(
+                        "PDF import flow: profile shows as closed and drawn on the canvas",
+                        page.locator("#btn-close-loop").is_disabled()
+                        and not page.locator("#btn-export-dxf").is_disabled(),
+                    )
+                )
+
+                # A profile that did NOT come from a PDF must not keep
+                # showing the previous import's provenance. This also puts
+                # the DXF profile back in place for the beam flow below, so
+                # wait for the import to actually land -- #section-results
+                # is already visible from the PDF import, so waiting on
+                # that would return immediately and race the fetch.
+                captured.pop("/section/from-dxf", None)
+                captured.pop("/section", None)
+                page.set_input_files("#dxf-file-input", str(fixture))
+                deadline = time.time() + 20
+                while "/section/from-dxf" not in captured and time.time() < deadline:
+                    page.wait_for_timeout(100)
+                page.wait_for_selector("#pdf-import-section[hidden]", state="attached", timeout=10000)
+                # This import also kicks off the solid-fill comparison's
+                # fire-and-forget POST /section. Let it land here, or it
+                # shows up later as an unexplained POST in the history
+                # flow's "frozen, not recomputed" check.
+                deadline = time.time() + 20
+                while "/section" not in captured and time.time() < deadline:
+                    page.wait_for_timeout(100)
+                dxf_resp = captured.get("/section/from-dxf", dxf_resp)
+                checks.append(
+                    Check(
+                        "PDF import flow: provenance panel clears when a non-PDF profile is loaded",
+                        page.locator("#pdf-import-section").get_attribute("hidden") is not None,
+                    )
+                )
+            else:
+                checks.append(
+                    Check(
+                        "PDF import flow: reference drawing present",
+                        False,
+                        f"{drawing.name} not found in the project root",
+                    )
+                )
 
             # Pixel-level check that the imported profile is actually
             # centered on the canvas, not clustered in a corner: find the

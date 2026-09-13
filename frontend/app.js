@@ -40,6 +40,14 @@ const btnClear = document.getElementById("btn-clear");
 const btnExportDxf = document.getElementById("btn-export-dxf");
 const btnImportDxf = document.getElementById("btn-import-dxf");
 const dxfFileInput = document.getElementById("dxf-file-input");
+const btnImportPdf = document.getElementById("btn-import-pdf");
+const pdfFileInput = document.getElementById("pdf-file-input");
+const pdfImportSectionEl = document.getElementById("pdf-import-section");
+const pdfImportGridEl = document.getElementById("pdf-import-grid");
+const pdfImportSummaryEl = document.getElementById("pdf-import-summary");
+const pdfDimTableEl = document.getElementById("pdf-dim-table");
+const pdfWarningListEl = document.getElementById("pdf-warning-list");
+const pdfMassCheckEl = document.getElementById("pdf-mass-check");
 const sketchHint = document.getElementById("sketch-hint");
 
 const materialSelect = document.getElementById("material-select");
@@ -645,9 +653,80 @@ function renderSectionResults(r) {
   resultRow(sectionResultGridSecondary, "EIyy", fmtNum(r.ei_yy), "N·mm²");
   resultRow(sectionResultGridSecondary, "GJ", fmtNum(r.gj), "N·mm²");
 
+  renderPdfImportInfo(r);
   renderSolidFillComparison(r);
   refreshBaselineComparison(r);
   refreshSuggestions(r);
+}
+
+/** Shows how a profile read off a PDF drawing was interpreted: the scale
+ * used and where it came from, the length found, and the dimension-by-
+ * dimension check that justifies it.
+ *
+ * Driven off `r.pdf_import`, which the API sets only for /section/from-pdf.
+ * Every other path through renderSectionResults (sketch, DXF, a run
+ * reloaded from history) leaves it null, so this panel hides itself --
+ * which is what keeps it from lingering with a previous profile's
+ * provenance after the profile has changed. */
+function renderPdfImportInfo(r) {
+  const info = r.pdf_import;
+  if (!info) {
+    pdfImportSectionEl.hidden = true;
+    return;
+  }
+  pdfImportGridEl.innerHTML = "";
+  const tb = info.title_block || {};
+  if (tb.part_number) resultRow(pdfImportGridEl, "Part Number", tb.part_number, "");
+  if (tb.title) resultRow(pdfImportGridEl, "Drawing Title", tb.title, "");
+  if (tb.material) resultRow(pdfImportGridEl, "Drawing Material", tb.material, "");
+  resultRow(pdfImportGridEl, "Page", String(info.page), "");
+  resultRow(pdfImportGridEl, "Scale", info.scale, "");
+  resultRow(pdfImportGridEl, "Scale Source", info.scale_source, "");
+  resultRow(
+    pdfImportGridEl,
+    "Extrusion Length",
+    info.length_mm === null ? "not found" : fmtNum(info.length_mm),
+    info.length_mm === null ? "" : "mm"
+  );
+  resultRow(pdfImportGridEl, "Length Source", info.length_source, "");
+
+  const checks = info.dimension_checks || [];
+  const agreed = checks.filter((c) => c.agrees).length;
+  pdfImportSummaryEl.textContent = `${info.scale}, ${agreed}/${checks.length} dimensions confirmed`;
+
+  pdfDimTableEl.innerHTML = "";
+  const head = document.createElement("tr");
+  ["Callout", "Stated (mm)", "Measured (mm)", "Error"].forEach((h) => {
+    const th = document.createElement("th");
+    th.textContent = h;
+    head.appendChild(th);
+  });
+  pdfDimTableEl.appendChild(head);
+  checks.forEach((c) => {
+    const tr = document.createElement("tr");
+    if (!c.agrees) tr.className = "dim-check-table__row--off";
+    [
+      c.text,
+      fmtNum(c.stated, { digits: 3 }),
+      fmtNum(c.measured, { digits: 3 }),
+      `${c.error_pct >= 0 ? "+" : ""}${fmtNum(c.error_pct, { digits: 2 })}%`,
+    ].forEach((v) => {
+      const td = document.createElement("td");
+      td.textContent = v;
+      tr.appendChild(td);
+    });
+    pdfDimTableEl.appendChild(tr);
+  });
+
+  pdfWarningListEl.innerHTML = "";
+  (info.warnings || []).forEach((w) => {
+    const li = document.createElement("li");
+    li.textContent = w;
+    pdfWarningListEl.appendChild(li);
+  });
+  pdfMassCheckEl.textContent = info.mass_check || "";
+  pdfMassCheckEl.hidden = !info.mass_check;
+  pdfImportSectionEl.hidden = false;
 }
 
 // Monotonically increasing token guarding refreshSuggestions against a
@@ -838,6 +917,53 @@ dxfFileInput.addEventListener("change", async () => {
     beamResultsEl.hidden = true;
   } catch (err) {
     showError(`DXF import failed: ${err.message}`);
+  }
+});
+
+/* ------------------------------------------------------------------
+   PDF drawing import
+------------------------------------------------------------------ */
+
+btnImportPdf.addEventListener("click", () => pdfFileInput.click());
+
+pdfFileInput.addEventListener("change", async () => {
+  const file = pdfFileInput.files[0];
+  pdfFileInput.value = "";
+  if (!file) return;
+  if (!state.selectedMaterial) {
+    showError("Load a material before importing a PDF drawing.");
+    return;
+  }
+  hideError();
+
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("material_name", state.selectedMaterial);
+
+  try {
+    const body = await apiFetch("/section/from-pdf", { method: "POST", body: formData });
+    state.points = body.vertices.map(([x, y]) => ({ x, y }));
+    state.holes = (body.holes || []).map((loop) => loop.map(([x, y]) => ({ x, y })));
+    state.isClosed = true;
+    state.sectionId = body.section_id;
+    fitViewToPolygon(state.points);
+    layoutCanvas();
+    updateToolbarState();
+    renderSectionResults(body);
+    sectionResultsEl.hidden = false;
+    beamInputsEl.hidden = false;
+    beamResultsEl.hidden = true;
+    // The drawing states the bar's cut length; prefill it so a beam run
+    // starts from the real part rather than an arbitrary number. Only when
+    // the field is empty, so a length the user has already typed is never
+    // overwritten.
+    const length = body.pdf_import && body.pdf_import.length_mm;
+    if (length && !inputLength.value) inputLength.value = String(length);
+  } catch (err) {
+    // The importer's refusals explain which drawing feature defeated it;
+    // they are the useful part of the message, so pass them through whole
+    // rather than collapsing to "import failed".
+    showError(`PDF import failed: ${err.message}`);
   }
 });
 
