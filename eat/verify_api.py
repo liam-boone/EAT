@@ -60,6 +60,7 @@ from fastapi.testclient import TestClient
 
 from eat.api import app
 from eat.baseline import DEFAULT_BASELINE_SETTING_PATH, get_baseline_setting, set_baseline_setting
+from eat.history import DEFAULT_HISTORY_PATH
 
 client = TestClient(app)
 
@@ -558,7 +559,12 @@ def check_history() -> list[Check]:
     test_steel = {"name": "Test Steel", "E": 200000, "nu": 0.3, "yield_strength": 250}
     rectangle = [[0, 0], [50, 0], [50, 100], [0, 100]]
 
-    before_count = len(client.get("/history").json())
+    # Identity, not count: with HISTORY_MAX_ENTRIES in force the log is
+    # usually already AT its cap, so "one more entry appeared" is no longer
+    # observable as a count going up. What the check actually means is
+    # "exactly one new entry was logged, and it is this analysis" -- so
+    # compare the set of ids.
+    before_ids = {s["id"] for s in client.get("/history").json()}
 
     # --- A fresh section-only entry ---
     resp = client.post("/section", json={"vertices": rectangle, "material": test_steel, "mesh_size": 1.0})
@@ -566,11 +572,12 @@ def check_history() -> list[Check]:
     section_id = resp.json()["section_id"]
 
     after_section = client.get("/history").json()
+    new_after_section = [s for s in after_section if s["id"] not in before_ids]
     checks.append(
         Check(
             "POST /section creates exactly one new history entry",
-            len(after_section) == before_count + 1,
-            f"before={before_count}, after={len(after_section)}",
+            len(new_after_section) == 1 and after_section[0]["id"] == new_after_section[0]["id"],
+            f"{len(new_after_section)} new id(s)",
         )
     )
     section_summary = after_section[0]  # most-recent-first
@@ -606,18 +613,18 @@ def check_history() -> list[Check]:
     # --- save_history: false suppresses logging (e.g. the frontend's
     # solid-fill comparison, or its section_id refresh before a beam
     # re-analysis) ---
-    count_before_suppressed = len(client.get("/history").json())
+    ids_before_suppressed = {s["id"] for s in client.get("/history").json()}
     resp = client.post(
         "/section",
         json={"vertices": rectangle, "material": test_steel, "mesh_size": 1.0, "save_history": False},
     )
     checks.append(Check("POST /section (save_history=false): 200 OK", resp.status_code == 200, resp.text))
-    count_after_suppressed = len(client.get("/history").json())
+    ids_after_suppressed = {s["id"] for s in client.get("/history").json()}
     checks.append(
         Check(
             "POST /section with save_history=false creates no history entry",
-            count_after_suppressed == count_before_suppressed,
-            f"before={count_before_suppressed}, after={count_after_suppressed}",
+            ids_after_suppressed == ids_before_suppressed,
+            f"{len(ids_after_suppressed - ids_before_suppressed)} unexpected new id(s)",
         )
     )
 
@@ -635,11 +642,12 @@ def check_history() -> list[Check]:
     checks.append(Check("POST /beam (for history test): 200 OK", resp.status_code == 200, resp.text))
 
     after_beam = client.get("/history").json()
+    new_after_beam = [s for s in after_beam if s["id"] not in before_ids]
     checks.append(
         Check(
             "POST /beam creates exactly one new history entry (on top of the section one)",
-            len(after_beam) == before_count + 2,
-            f"count={len(after_beam)}, expected={before_count + 2}",
+            len(new_after_beam) == 2 and after_beam[0]["id"] not in {s["id"] for s in after_section},
+            f"{len(new_after_beam)} new id(s) since the start of this check",
         )
     )
     beam_summary = after_beam[0]  # most-recent-first
@@ -770,11 +778,87 @@ def check_baseline() -> list[Check]:
 # --- /suggestions ---------------------------------------------------------------
 
 
+def check_cache_and_misc() -> list[Check]:
+    """The section-id LRU, the PDF page selector, and the warnings channel."""
+    checks: list[Check] = []
+    rectangle = [[0, 0], [50, 0], [50, 100], [0, 100]]
+    test_steel = {"name": "Cache Steel", "E": 200000, "nu": 0.3, "yield_strength": 250}
+
+    # --- the LRU cap. Uncapped, ids accumulated for the life of the
+    # process (~29 KB each on a real profile, one per material change and
+    # per profile edit), which is a slow leak with no ceiling.
+    from eat.api import SECTION_CACHE_MAX, _SECTION_CACHE
+
+    _SECTION_CACHE.clear()
+    ids = []
+    for i in range(SECTION_CACHE_MAX + 10):
+        resp = client.post(
+            "/section",
+            json={
+                "vertices": [[0, 0], [50 + i * 0.01, 0], [50, 100], [0, 100]],
+                "material": test_steel,
+                "mesh_size": 40.0,
+                "save_history": False,
+            },
+        )
+        ids.append(resp.json()["section_id"])
+    checks.append(
+        Check(
+            f"Section cache stops growing at SECTION_CACHE_MAX ({SECTION_CACHE_MAX})",
+            len(_SECTION_CACHE) == SECTION_CACHE_MAX,
+            f"{len(_SECTION_CACHE)} entries after {len(ids)} analyses",
+        )
+    )
+    checks.append(
+        Check(
+            "Section cache: the newest id is still usable",
+            client.post("/suggestions", json={"section_id": ids[-1]}).status_code == 200,
+        )
+    )
+    evicted = client.post("/suggestions", json={"section_id": ids[0]})
+    checks.append(
+        Check(
+            "Section cache: an evicted id gives a clean 404, not a crash",
+            evicted.status_code == 404 and "section" in evicted.json()["detail"].lower(),
+            f"{evicted.status_code}: {evicted.text[:90]}",
+        )
+    )
+    # Least recently USED, not inserted: touching an old id must save it
+    # from the next eviction, or working on one profile while changing
+    # material repeatedly would evict the profile out from under the user.
+    survivor = ids[-SECTION_CACHE_MAX]
+    client.post("/suggestions", json={"section_id": survivor})  # touch it
+    client.post(
+        "/section",
+        json={"vertices": rectangle, "material": test_steel, "mesh_size": 40.0, "save_history": False},
+    )
+    checks.append(
+        Check(
+            "Section cache is least-recently-USED, not least-recently-inserted",
+            client.post("/suggestions", json={"section_id": survivor}).status_code == 200,
+        )
+    )
+    _SECTION_CACHE.clear()
+
+    # --- GET /warnings: the channel that replaced a bare 500 when a local
+    # state file can't be read.
+    warn = client.get("/warnings")
+    checks.append(Check("GET /warnings: 200 OK", warn.status_code == 200, warn.text[:120]))
+    checks.append(
+        Check(
+            "GET /warnings: returns a warnings list (empty when stores are healthy)",
+            isinstance(warn.json().get("warnings"), list),
+            warn.text[:120],
+        )
+    )
+    return checks
+
+
 def check_suggestions() -> list[Check]:
     checks: list[Check] = []
     l_angle = [[0, 0], [50, 0], [50, 10], [10, 10], [10, 60], [0, 60]]
 
-    history_before = len(client.get("/history").json())
+    history_before = {s["id"] for s in client.get("/history").json()}
 
     resp = client.post("/suggestions", json={"section": {"vertices": l_angle}})
     checks.append(Check("POST /suggestions (inline section): 200 OK", resp.status_code == 200, resp.text))
@@ -797,8 +881,8 @@ def check_suggestions() -> list[Check]:
     checks.append(
         Check(
             "POST /suggestions creates no history entry (it's advice, not an analysis run)",
-            len(client.get("/history").json()) == history_before,
-            f"before={history_before}, after={len(client.get('/history').json())}",
+            {s["id"] for s in client.get("/history").json()} == history_before,
+            f"{len({s['id'] for s in client.get('/history').json()} - history_before)} unexpected new id(s)",
         )
     )
 
@@ -860,12 +944,20 @@ def main() -> int:
     # Snapshot history before anything runs: check_section/_from_dxf/_beam
     # all trigger their own history-logging as a side effect of exercising
     # /section, /section/from-dxf, and /beam, same as real usage would.
-    # Sweeping up everything new at the end (rather than hand-tracking ids
-    # through every function) keeps eat/history.json -- the real file a
-    # user's actual runs live in, not a throwaway test fixture -- exactly
-    # as it was before this script ran, the same restore-to-original-state
-    # discipline check_materials() already applies to materials.json.
-    history_baseline_ids = {s["id"] for s in client.get("/history").json()}
+    # This keeps eat/history.json -- the real file a user's actual runs
+    # live in, not a throwaway test fixture -- exactly as it was before
+    # this script ran, the same restore-to-original-state discipline
+    # check_materials() already applies to materials.json.
+    #
+    # Snapshot the FILE, not the set of ids. Deleting whatever is new at
+    # the end was sufficient only while history grew without bound; with
+    # `HISTORY_MAX_ENTRIES` in force, the entries this script adds EVICT
+    # the user's oldest runs, and no amount of deleting afterwards brings
+    # those back. Restoring the bytes does.
+    history_file_before = (
+        DEFAULT_HISTORY_PATH.read_bytes() if DEFAULT_HISTORY_PATH.exists() else None
+    )
+    history_count_before = len(client.get("/history").json())
     # Same discipline for the baseline *setting* (which profile is
     # selected) -- check_baseline() changes it via POST /baseline; restore
     # whatever it was, bypassing the API (there's no GET for the raw
@@ -883,18 +975,19 @@ def main() -> int:
         + check_history()
         + check_baseline()
         + check_suggestions()
+        + check_cache_and_misc()
     )
 
-    history_after = client.get("/history").json()
-    new_ids = [s["id"] for s in history_after if s["id"] not in history_baseline_ids]
-    for entry_id in new_ids:
-        client.delete(f"/history/{entry_id}")
+    if history_file_before is None:
+        DEFAULT_HISTORY_PATH.unlink(missing_ok=True)
+    else:
+        DEFAULT_HISTORY_PATH.write_bytes(history_file_before)
     history_final_count = len(client.get("/history").json())
     all_checks.append(
         Check(
             "History file restored to its pre-test state",
-            history_final_count == len(history_baseline_ids),
-            f"baseline={len(history_baseline_ids)}, final={history_final_count}",
+            history_final_count == history_count_before,
+            f"before={history_count_before}, after={history_final_count}",
         )
     )
 

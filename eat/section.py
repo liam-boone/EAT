@@ -35,20 +35,10 @@ import math
 
 from sectionproperties.analysis import Section
 from sectionproperties.pre import Geometry
-from shapely.geometry import LinearRing, Polygon
+from shapely.geometry import Polygon
 from shapely.geometry.polygon import orient
 
-# Nothing in the profile may be thinner than this fraction of its own
-# bounding-box diagonal. The FE mesher is a C library: handed a hairline
-# it does not raise, it takes tens of seconds, allocates unboundedly, or
-# dies on a SIGBUS that takes the whole server process with it -- and it
-# does so non-monotonically (a 100mm x 0.001mm sliver hangs, 100 x 0.0003
-# meshes fine), so there is nothing to catch and retry. Measured: every
-# sliver at or below this ratio is slow or fatal, everything above it
-# meshes in under a second. Real profiles sit orders of magnitude clear --
-# the 20x40 KJN fixture is at 4.5e-2, and a 200x200 tube with 0.8mm walls,
-# about as thin-walled as an extrusion gets, is at 1.7e-3.
-MIN_INSCRIBED_SPAN_RATIO = 1e-4
+from eat.profile import MIN_INSCRIBED_SPAN_RATIO, validate_profile  # noqa: F401  (re-exported)
 
 
 @dataclass
@@ -153,6 +143,23 @@ class SectionResult:
 
     mass_per_length: float | None  # kg/m (density * area); None if material.density unset
 
+    # Convex hull of the OUTER boundary, in centroid-relative coordinates
+    # (mm), counter-clockwise and not repeating the closing point.
+    #
+    # This is what lets `eat.beam` find the true peak bending stress on a
+    # section whose principal axes aren't the sketch axes. Under
+    # unsymmetric bending the stress is a linear function over the
+    # cross-section, and the maximum of a linear function over a compact
+    # set is attained at an extreme point of its convex hull -- so
+    # evaluating it at these points is not a sample, it is exact. Hole
+    # vertices cannot be extreme (they are interior to the outer ring), so
+    # only the outer boundary contributes.
+    #
+    # Stored centroid-relative so it is directly usable as the (x, y) in
+    # the stress formula and is independent of where on the canvas the
+    # profile happened to be drawn.
+    hull: list[tuple[float, float]]
+
     def as_dict(self) -> dict:
         return asdict(self)
 
@@ -183,83 +190,6 @@ class SectionResult:
         return "\n".join(lines)
 
 
-def _validate_profile(
-    vertices: list[tuple[float, float]],
-    holes: list[list[tuple[float, float]]] | None,
-) -> None:
-    """Reject geometry the FE mesher cannot be trusted with, with a reason.
-
-    This is a hard prerequisite, not a nicety. `sectionproperties` meshes
-    through a C library that does not validate its input: handed a
-    self-intersecting outline, a zero-area profile, a NaN vertex or a
-    hairline sliver it variously hangs, allocates until the machine
-    swaps, or dies on a SIGBUS -- which in the server takes down the
-    whole process, not just the request. Two more cases return a number
-    that is silently WRONG rather than failing at all: a hole that isn't
-    inside the profile is quietly ignored (a 10x10 square with a stray
-    hole reports the full 100 mm^2), and two overlapping holes have their
-    overlap subtracted twice (400 - 36 - 36 rather than 400 - 63).
-
-    Each test below names the case it exists for. Note the deliberate
-    gap: a hole whose boundary TOUCHES the outer boundary is accepted
-    even though Shapely calls the result invalid, because `eat.dxf_io`
-    classifies holes with `covers` specifically so that a hole meeting
-    the profile wall still imports -- so a bare `polygon.is_valid` test
-    here would reject files that import correctly today.
-    """
-    if len(vertices) < 3:
-        raise ValueError("A polygon needs at least 3 vertices")
-    for hole in holes or []:
-        if len(hole) < 3:
-            raise ValueError("A hole needs at least 3 vertices")
-
-    rings = [("profile", vertices)] + [(f"hole {i + 1}", h) for i, h in enumerate(holes or [])]
-    for label, ring in rings:
-        for x, y in ring:
-            if not (math.isfinite(x) and math.isfinite(y)):
-                raise ValueError(
-                    f"The {label} has a vertex that isn't a finite number ({x}, {y}). "
-                    "Check the source drawing for a malformed coordinate."
-                )
-        # A ring that crosses itself (a bowtie, a figure-8, a doubled-back
-        # outline) has no well-defined interior to mesh.
-        if not LinearRing(ring).is_simple:
-            raise ValueError(
-                f"The {label} outline crosses itself. A profile has to be a single "
-                "simple closed loop — check for a stray vertex or a doubled-back edge."
-            )
-
-    shell = Polygon(vertices)
-    for i, hole in enumerate(holes or []):
-        hole_poly = Polygon(hole)
-        if not shell.covers(hole_poly):
-            raise ValueError(
-                f"Hole {i + 1} is not fully inside the profile, so it can't be "
-                "subtracted from it. Interior loops must be fully enclosed."
-            )
-        for j, other in enumerate((holes or [])[:i]):
-            if hole_poly.intersection(Polygon(other)).area > 0:
-                raise ValueError(
-                    f"Holes {j + 1} and {i + 1} overlap each other. Merge them into a "
-                    "single loop — overlapping holes would be subtracted twice."
-                )
-
-    polygon = Polygon(vertices, holes or None)
-    if polygon.area <= 0:
-        raise ValueError(
-            "The profile encloses no area — its outline is degenerate, or its holes "
-            "consume all of it."
-        )
-    minx, miny, maxx, maxy = polygon.bounds
-    span = math.hypot(maxx - minx, maxy - miny)
-    if span <= 0 or polygon.buffer(-span * MIN_INSCRIBED_SPAN_RATIO).is_empty:
-        raise ValueError(
-            f"The profile is a hairline sliver: no part of it is more than "
-            f"{2 * span * MIN_INSCRIBED_SPAN_RATIO:.3g} mm thick across a "
-            f"{span:.4g} mm span. Check the units and for near-duplicate vertices."
-        )
-
-
 def _build_geometry(
     vertices: list[tuple[float, float]],
     holes: list[list[tuple[float, float]]] | None = None,
@@ -269,14 +199,17 @@ def _build_geometry(
 
     Vertices (and each hole's vertices) should describe a single simple
     (non-self-intersecting) ring; the last point does not need to repeat
-    the first. `_validate_profile` enforces that and everything else the
-    mesher needs. `orient(..., sign=1.0)` normalises the exterior ring to
+    the first. `eat.profile.validate_profile` enforces that and everything
+    else the mesher needs -- it lives there rather than here so the two
+    geometry-only engines (suggestions, local buckling) can hold profiles
+    to the same contract without importing the FE stack.
+    `orient(..., sign=1.0)` normalises the exterior ring to
     counter-clockwise and every interior (hole) ring to clockwise, which
     is both what sectionproperties expects and the standard Shapely
     convention -- confirmed against a hand-calculable case (50x100mm
     rectangle minus a centered 20x20mm square hole) in verify_section.py.
     """
-    _validate_profile(vertices, holes)
+    validate_profile(vertices, holes)
     polygon = orient(Polygon(vertices, holes or None), sign=1.0)
     # Use the pure geometric default material (E=1, nu=0) so the raw
     # geometric getters (get_ic, get_j, ...) stay available; the caller's
@@ -329,6 +262,11 @@ def analyze_section(
     # 0.05m x 0.10m x 1m block's mass.
     mass_per_length = material.density * area * 1e-6 if material.density is not None else None
 
+    # Extreme-fibre geometry for unsymmetric bending -- see SectionResult.hull.
+    # Taken from the outer ring only and stored relative to the centroid.
+    hull_ring = orient(Polygon(vertices).convex_hull, sign=1.0).exterior
+    hull = [(float(px) - cx, float(py) - cy) for px, py in list(hull_ring.coords)[:-1]]
+
     return SectionResult(
         material=material.name,
         area=area,
@@ -354,6 +292,7 @@ def analyze_section(
         ei_yy=material.E * iyy,
         gj=material.G * sec.get_j(),
         mass_per_length=mass_per_length,
+        hull=hull,
     )
 
 

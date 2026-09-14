@@ -28,6 +28,7 @@ from eat import history
 from eat.dxf_io import import_polygon_from_bytes
 from eat.materials import get_material
 from eat.section import analyze_section
+from eat.storage import quarantine, read_json_or_recover, write_json_atomically
 
 DEFAULT_BASELINE_SETTING_PATH = Path(__file__).parent / "baseline.json"
 BUILTIN_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "20X40_KJN992891.dxf"
@@ -48,20 +49,39 @@ class BaselineInfo:
     history_entry_id: str | None = None
 
 
+_DEFAULT_SETTING = {"type": "builtin"}
+_RECOVERY_HINT = (
+    "The baseline has been reset to the built-in 20x40 KJN profile; pick another from "
+    "the History panel if you had one selected."
+)
+
+
 def get_baseline_setting(path: Path | str = DEFAULT_BASELINE_SETTING_PATH) -> dict[str, Any]:
     """The persisted selection, defaulting to the built-in profile if
-    nothing has been chosen yet (including on a brand-new install)."""
-    p = Path(path)
-    if not p.exists():
-        return {"type": "builtin"}
-    return json.loads(p.read_text())
+    nothing has been chosen yet (including on a brand-new install).
+
+    A damaged file resets to the built-in rather than raising -- this is
+    a one-line setting, and 500-ing every comparison over it would be
+    absurd. Anything that isn't a JSON object counts as damaged: the
+    setting is read with `.get`, so a list or a bare number would
+    otherwise raise an AttributeError deeper in."""
+    setting = read_json_or_recover(path, dict(_DEFAULT_SETTING), "baseline selection", _RECOVERY_HINT)
+    if not isinstance(setting, dict):
+        quarantine(
+            path,
+            f"The baseline selection file ({Path(path).name}) is not a settings object "
+            f"and has been reset.",
+            _RECOVERY_HINT,
+        )
+        return dict(_DEFAULT_SETTING)
+    return setting
 
 
 def set_baseline_setting(setting: dict[str, Any], path: Path | str = DEFAULT_BASELINE_SETTING_PATH) -> None:
     """Atomically, so an interrupted write can't leave a file that makes
     every subsequent baseline lookup raise. See
-    `eat.history.write_json_atomically`."""
-    history.write_json_atomically(path, json.dumps(setting, indent=2, ensure_ascii=False) + "\n")
+    `eat.storage.write_json_atomically`."""
+    write_json_atomically(path, json.dumps(setting, indent=2, ensure_ascii=False) + "\n")
 
 
 _builtin_cache: BaselineInfo | None = None

@@ -29,7 +29,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from eat.local_buckling import analyze_local_buckling
 from eat.section import Material, analyze_section
+from eat.suggestions import generate_suggestions
 
 MATERIAL = Material(name="Test Steel", E=200_000, nu=0.3, yield_strength=250, density=7850)
 
@@ -205,6 +207,58 @@ def run_input_guard_checks() -> list[Check]:
         except Exception:  # noqa: BLE001
             ok = False
         checks.append(Check("Accepts", label[:22], 1.0, 1.0 if ok else 0.0, 1e-9))
+    return checks + _shared_contract_checks()
+
+
+def _shared_contract_checks() -> list[Check]:
+    """All three profile engines must agree on what they accept.
+
+    Section analysis, the DFM suggestions and the per-wall plate check had
+    three different ideas: section analysis validated nothing, the other
+    two used a bare `polygon.is_valid`. So the same DXF could return
+    section properties but no design review and no buckling check -- and
+    the case that actually happened is a hole whose boundary touches the
+    outer wall, which `eat.dxf_io` classifies with `covers` specifically
+    so that it imports, and which Shapely calls invalid.
+
+    They now share `eat.profile.validate_profile`. This asserts the
+    agreement directly rather than trusting that they call the same
+    function, because the failure mode is a divergence, not a crash."""
+    square = [(0, 0), (10, 0), (10, 10), (0, 10)]
+    cases = {
+        "valid square": (square, None),
+        "hole touching the outer wall": (square, [[(0, 2), (4, 2), (4, 4), (0, 4)]]),
+        "rect with a centred hole": (
+            [(0, 0), (50, 0), (50, 100), (0, 100)],
+            [[(15, 40), (35, 40), (35, 60), (15, 60)]],
+        ),
+        "self-intersecting bowtie": ([(0, 0), (10, 10), (10, 0), (0, 10)], None),
+        "hole outside the profile": (square, [[(20, 20), (25, 20), (25, 25)]]),
+        "two overlapping holes": (
+            [(0, 0), (20, 0), (20, 20), (0, 20)],
+            [[(2, 2), (8, 2), (8, 8), (2, 8)], [(5, 5), (11, 5), (11, 11), (5, 11)]],
+        ),
+        "NaN vertex": ([(0, 0), (10, 0), (float("nan"), 10), (0, 10)], None),
+        "hairline sliver": ([(0, 0), (100, 0), (100, 0.001)], None),
+    }
+    engines = {
+        "section": lambda v, h: analyze_section(v, MATERIAL, mesh_size=2.0, holes=h),
+        "suggestions": lambda v, h: generate_suggestions(v, h),
+        "buckling": lambda v, h: analyze_local_buckling(v, h, MATERIAL),
+    }
+    checks: list[Check] = []
+    for label, (verts, holes) in cases.items():
+        accepted = {}
+        for name, fn in engines.items():
+            try:
+                fn(verts, holes)
+                accepted[name] = True
+            except ValueError:
+                accepted[name] = False
+            except Exception:  # noqa: BLE001 -- anything else is a different bug
+                accepted[name] = None
+        agree = len(set(accepted.values())) == 1 and None not in accepted.values()
+        checks.append(Check("All 3 agree", label[:22], 1.0, 1.0 if agree else 0.0, 1e-9))
     return checks
 
 

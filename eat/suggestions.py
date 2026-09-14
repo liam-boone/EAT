@@ -212,6 +212,7 @@ from typing import Any
 from shapely.geometry import Polygon, box
 from shapely.geometry.polygon import orient
 
+from eat.profile import validate_profile
 from eat.thickness import (
     ThicknessSample,
     normalized_rings,
@@ -949,12 +950,12 @@ def generate_suggestions(
 ) -> list[Suggestion]:
     """Every suggestion the geometry actually supports, most
     manufacturing-critical first, capped at MAX_SUGGESTIONS."""
-    if len(vertices) < 3:
-        raise ValueError("A profile needs at least 3 vertices")
+    # Same contract as the section engine -- see eat.profile for why this
+    # is not a bare polygon.is_valid test, and why all three engines now
+    # share one definition instead of three.
+    validate_profile(vertices, holes)
 
     poly = _build_polygon(vertices, holes)
-    if not poly.is_valid:
-        raise ValueError("Profile polygon is self-intersecting or otherwise invalid")
     rings = normalized_rings(vertices, holes)
     moments = polygon_moments(vertices, holes)
 

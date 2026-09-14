@@ -11,6 +11,7 @@ Run with: python -m eat.verify_materials
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from eat.materials import (
     DEFAULT_MATERIALS_PATH,
@@ -186,10 +187,62 @@ def check_add_edit_delete_cycle() -> list[Check]:
     return checks
 
 
+def check_recovery() -> list[Check]:
+    """A damaged materials.json resets to empty rather than 500-ing every
+    route that resolves a material.
+
+    Materials is the awkward store to reset -- an empty list leaves the
+    app unable to analyze anything -- so the point of these checks is as
+    much that the WARNING is loud and names the backup as that the reset
+    happens. Tested against throwaway paths; the real seeded file is never
+    touched."""
+    import tempfile
+
+    from eat.storage import clear_store_warnings, store_warnings
+
+    checks: list[Check] = []
+    good = Path(DEFAULT_MATERIALS_PATH).read_text()
+    cases = {
+        "truncated mid-write": good[: len(good) // 2],
+        "empty file": "",
+        "not JSON at all": "\x00nonsense",
+        "valid JSON, wrong shape": '{"materials": []}',
+        "a record with a negative modulus": '[{"name": "bad", "E": -7e10, "nu": 0.33}]',
+        "a record missing E": '[{"name": "bad", "nu": 0.33}]',
+    }
+    for label, damage in cases.items():
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "materials.json"
+            path.write_text(damage)
+            clear_store_warnings()
+            try:
+                loaded = load_materials(path)
+                raised = None
+            except Exception as exc:  # noqa: BLE001
+                loaded, raised = None, exc
+            checks.append(
+                Check(f"Recovery ({label}): loads without raising", raised is None,
+                      f"{type(raised).__name__}: {raised}" if raised else ""))
+            if raised is not None:
+                continue
+            checks.append(Check(f"Recovery ({label}): resets to an empty list", loaded == []))
+            checks.append(
+                Check(f"Recovery ({label}): the damaged file is kept, not deleted",
+                      any(".corrupt-" in q.name for q in Path(tmp).iterdir()),
+                      f"{[q.name for q in Path(tmp).iterdir()]}"))
+            warnings = store_warnings()
+            checks.append(
+                Check(f"Recovery ({label}): the warning says the list needs restoring",
+                      any("EMPTY" in w or "restore" in w.lower() for w in warnings),
+                      f"{warnings}"))
+    clear_store_warnings()
+    return checks
+
+
 def main() -> int:
     print(f"Materials file: {DEFAULT_MATERIALS_PATH}\n")
 
-    all_checks = check_seed_roundtrip() + check_add_edit_delete_cycle()
+    all_checks = check_seed_roundtrip() + check_add_edit_delete_cycle() + check_recovery()
 
     width = max(len(c.label) for c in all_checks) + 2
     all_passed = True

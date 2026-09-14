@@ -16,9 +16,10 @@ conversion beyond what eat.materials already does at the JSON boundary.
 
 A computed section can be referenced by id in a later POST /beam call
 (`section_id`, returned by POST /section and /section/from-dxf) instead
-of resending its vertices. This cache is in-memory and per-process — it
-resets on server restart and is not shared across workers; that's fine
-for this tool's single-user, single-process local-server use case. It
+of resending its vertices. This cache is an in-memory LRU capped at
+`SECTION_CACHE_MAX`, per-process — it resets on server restart and is not
+shared across workers; that's fine for this tool's single-user,
+single-process local-server use case. It
 also retains the section's original vertices/holes (`_CachedSection`),
 needed to log a full profile snapshot to history when a later POST /beam
 references it by id rather than resending geometry.
@@ -39,6 +40,7 @@ client-side math), not analysis runs in their own right.
 from __future__ import annotations
 
 import uuid
+from collections import OrderedDict
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -47,7 +49,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 
-from eat import baseline, history, suggestions
+from eat import baseline, history, storage, suggestions
 from eat.beam import BeamResult, BoundaryCondition, PointLoad, analyze_beam
 from eat.dxf_io import DxfImportError, export_polygon_to_text, import_polygon_from_bytes
 from eat.local_buckling import analyze_local_buckling
@@ -79,9 +81,28 @@ class _CachedSection:
     holes: list[list[Vertex]]
 
 
-# In-memory cache: section_id -> _CachedSection, populated by POST /section
-# and /section/from-dxf, consumed by POST /beam's optional section_id input.
-_SECTION_CACHE: dict[str, _CachedSection] = {}
+# How many analyzed sections to keep addressable by id at once. The
+# frontend POSTs /section on every profile edit AND every material change,
+# so ids accumulate fast during ordinary use: an entry is ~29 KB for a
+# real 929-vertex profile, so an uncapped cache held ~14 MB per 500 edits
+# for the life of the process. 64 is far more than the handful of ids any
+# one session actually refers back to (the current profile, plus whatever
+# the user reloads from history), while keeping the worst case ~2 MB.
+SECTION_CACHE_MAX = 64
+
+# In-memory LRU: section_id -> _CachedSection, populated by POST /section,
+# /section/from-dxf and /section/from-pdf, consumed by POST /beam's and
+# /suggestions' optional section_id input. Least-recently-USED, not
+# -inserted, so a profile that is still being worked on doesn't get
+# evicted out from under the user by a burst of material changes.
+_SECTION_CACHE: "OrderedDict[str, _CachedSection]" = OrderedDict()
+
+
+def _cache_get(section_id: str) -> _CachedSection | None:
+    cached = _SECTION_CACHE.get(section_id)
+    if cached is not None:
+        _SECTION_CACHE.move_to_end(section_id)
+    return cached
 
 
 def _error_message(exc: Exception) -> str:
@@ -276,6 +297,12 @@ class SectionResponse(BaseModel):
     ei_yy: float = Field(description="Bending stiffness about y (E * Iyy), N*mm^2")
     gj: float = Field(description="Torsional stiffness (G * J), N*mm^2")
     mass_per_length: float | None = Field(description="kg/m; null if the material has no density")
+    hull: list[Vertex] = Field(
+        default_factory=list,
+        description="Convex hull of the outer boundary, centroid-relative (mm). The extreme "
+        "fibres: under unsymmetric bending the peak stress is attained at one of these "
+        "points exactly, which is how POST /beam locates it.",
+    )
 
     @classmethod
     def from_result(
@@ -304,6 +331,9 @@ class SectionResponse(BaseModel):
 def _store_section(result: SectionResult, vertices: list[Vertex], holes: list[list[Vertex]] | None) -> str:
     section_id = uuid.uuid4().hex
     _SECTION_CACHE[section_id] = _CachedSection(result=result, vertices=vertices, holes=holes or [])
+    _SECTION_CACHE.move_to_end(section_id)
+    while len(_SECTION_CACHE) > SECTION_CACHE_MAX:
+        _SECTION_CACHE.popitem(last=False)  # drop the least recently used
     return section_id
 
 
@@ -409,7 +439,7 @@ async def post_section_from_pdf(
         pdf_result = import_pdf_profile_from_bytes(
             raw,
             source_label=file.filename or "<uploaded file>",
-            page=(page - 1) if page else None,
+            page=(page - 1) if page is not None else None,
         )
     except PdfImportError as exc:
         raise HTTPException(400, str(exc)) from exc
@@ -458,6 +488,35 @@ def post_section_to_dxf(req: ExportDxfRequest) -> Response:
         media_type="application/dxf",
         headers={"Content-Disposition": 'attachment; filename="profile.dxf"'},
     )
+
+
+# --- Local-state health -------------------------------------------------------
+
+
+class StoreWarningsResponse(BaseModel):
+    warnings: list[str] = Field(
+        default_factory=list,
+        description="Problems found while loading local state (run history, material list, "
+        "baseline selection). A store that can't be read is quarantined — renamed aside, "
+        "not deleted — and reset to its default, and the reason lands here rather than "
+        "taking every endpoint down with a 500.",
+    )
+
+
+@app.get("/warnings", response_model=StoreWarningsResponse)
+def get_warnings() -> StoreWarningsResponse:
+    """Anything that went wrong loading this server's local state.
+
+    The frontend polls this on load so a reset store is visible to the
+    user -- a corrupt material list in particular leaves the app unable to
+    analyze anything, and silence there would be baffling."""
+    # Touch each store so a file that is corrupt but not yet read this
+    # process gets discovered now, rather than on whichever request
+    # happens to need it first.
+    load_materials()
+    history.list_summaries()
+    baseline.get_baseline_setting()
+    return StoreWarningsResponse(warnings=storage.store_warnings())
 
 
 # --- Material list endpoints -------------------------------------------------
@@ -560,19 +619,47 @@ class BeamResponse(BaseModel):
     max_moment_position: float = Field(description="mm")
     max_bending_stress: float = Field(description="MPa, magnitude (worst-case fibre)")
     max_bending_stress_position: float = Field(description="mm")
-    safety_factor: float | None = Field(description="yield_strength / max_bending_stress; null if the material has no yield strength")
-    max_deflection: float = Field(description="mm, signed")
+    safety_factor: float | None = Field(description="yield_strength / max_bending_stress; null if undefined — see safety_factor_status")
+    safety_factor_status: str = Field(
+        description="Why there is or isn't a bending safety factor: 'ok' (a factor is "
+        "reported), 'no_yield_strength' (the material has none on file, so it is "
+        "undefined), or 'no_stress' (this load case produces no bending moment, so it is "
+        "infinite). The last two are different facts and used to look identical as a bare null."
+    )
+    max_deflection: float = Field(description="mm, signed, component ALONG the load axis")
     max_deflection_position: float = Field(description="mm")
     effective_length_factor: float = Field(description="K, dimensionless")
     euler_buckling_load: float = Field(description="N")
-    axial_load: float | None = Field(description="N, along the section's Z (long) axis; null if not supplied")
+    axial_load: float | None = Field(description="N, along the section's Z (long) axis, POSITIVE IN COMPRESSION (see UNITS.md); null if not supplied")
     buckling_safety_factor: float | None = Field(
-        description="euler_buckling_load / axial_load; null if axial_load wasn't supplied"
+        description="euler_buckling_load / axial_load; null unless the axial load is compressive — see buckling_status"
+    )
+    buckling_status: str = Field(
+        description="Why there is or isn't a buckling safety factor: 'compression' (a "
+        "factor is reported), 'tension' (suppressed — a member in tension cannot buckle), "
+        "or 'no_axial' (no axial load given)."
+    )
+    max_deflection_transverse: float = Field(
+        description="mm, signed, deflection PERPENDICULAR to the load at the same station as "
+        "max_deflection. Non-zero only under unsymmetric bending (Ixy != 0)."
+    )
+    max_deflection_resultant: float = Field(description="mm, magnitude of the deflection vector at its own worst station")
+    max_deflection_resultant_position: float = Field(description="mm")
+    max_bending_stress_point: tuple[float, float] = Field(
+        description="(x, y) mm from the centroid of the fibre carrying the peak stress"
+    )
+    principal_angle_deg: float = Field(description="Rotation from the sketch axes to the first principal axis, degrees")
+    i11: float = Field(description="Major principal second moment of area, mm^4")
+    i22: float = Field(description="Minor principal second moment of area, mm^4 — the weak axis Euler buckling uses")
+    asymmetry: float = Field(
+        description="|Ixy| / sqrt(Ixx*Iyy). Zero when the sketch axes are already principal; "
+        "the larger it is, the further unsymmetric bending departs from the M/Z answer."
     )
     diagram_x: list[float] = Field(description="Position along the beam, mm")
     moment_diagram: list[float] = Field(description="N*mm, same length as diagram_x")
     bending_stress_diagram: list[float] = Field(description="MPa (magnitude), same length as diagram_x")
-    deflection_diagram: list[float] = Field(description="mm, same length as diagram_x")
+    deflection_diagram: list[float] = Field(description="mm along the load axis, same length as diagram_x")
+    deflection_diagram_transverse: list[float] = Field(description="mm perpendicular to it, same length as diagram_x")
     local_buckling: dict | None = Field(
         default=None,
         description=(
@@ -595,7 +682,7 @@ def post_beam(req: BeamRequest) -> BeamResponse:
     material = _resolve_material(req.material_name, req.material)
 
     if req.section_id is not None:
-        cached = _SECTION_CACHE.get(req.section_id)
+        cached = _cache_get(req.section_id)
         if cached is None:
             raise HTTPException(
                 404,
@@ -848,7 +935,7 @@ def post_suggestions(req: SuggestionsRequest) -> list[SuggestionResponse]:
     it is. Purely geometric: no material, no meshing, and nothing logged
     to history, since asking for advice isn't an analysis run."""
     if req.section_id is not None:
-        cached = _SECTION_CACHE.get(req.section_id)
+        cached = _cache_get(req.section_id)
         if cached is None:
             raise HTTPException(
                 404,

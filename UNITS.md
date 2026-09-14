@@ -100,6 +100,47 @@ reaction moment).
 always acts along the section's long axis (**Z**, the beam's length
 direction), used only for the Euler buckling safety factor.
 
+**Axial load sign: positive is COMPRESSION, negative is tension.** This
+is the one place the sign convention does not follow the "+ve in the
++axis direction" rule the transverse loads use, because the axis in
+question is the length and there is no canvas direction to refer to.
+Compression is positive because it is the case the field exists to
+serve — the buckling check has no meaning in tension.
+
+That matters for reading the result, not just for entering the load:
+
+- **Compression (positive)** — the Euler safety factor is reported,
+  `Pcr / axial_load`.
+- **Tension (negative)** — the buckling check is **suppressed**, and the
+  UI reads "N/A — tension". A member in tension cannot buckle; dividing
+  through anyway would report a negative "safety factor", which is
+  meaningless and was doing so before this was pinned down.
+- **Zero or blank** — no axial load, so no factor. The Euler load itself
+  is still reported, since it is a property of the profile and length.
+
+`BeamResult.buckling_status` carries which of those three applies
+(`"compression"` / `"tension"` / `"no_axial"`), so the frontend never has
+to infer the reason from a bare `null`.
+
+## Unsymmetric bending
+
+Bending is solved about the section's **principal** axes, not the sketch
+axes, so a profile whose `Ixy ≠ 0` (an angle, a Z, or simply a profile
+drawn at an angle on the canvas) gets its true peak stress and deflects
+out of the load plane as it really does. Units are unchanged — this is a
+change of method, not of convention — but two reported quantities are new
+and worth naming here:
+
+| Quantity | Unit | Meaning |
+|---|---|---|
+| `max_deflection` | mm | Component **along** the load axis (what the deflection chart plots, and what this field has always meant) |
+| `max_deflection_transverse` | mm | Component **perpendicular** to it, at the same station. Identically zero when `Ixy = 0` |
+| `max_deflection_resultant` | mm | Magnitude of the vector sum, at its own worst station |
+| `max_bending_stress_point` | mm | `(x, y)` of the worst fibre, measured **from the centroid** |
+| `principal_angle_deg` | ° | Rotation from the sketch axes to the first principal axis |
+| `i11` / `i22` | mm⁴ | Major / minor principal second moments. `i22` is the weak axis the Euler check uses |
+| `asymmetry` | — | `\|Ixy\| / √(Ixx·Iyy)`, dimensionless. Zero when the sketch axes are already principal |
+
 Loads are assumed to act through the section's shear centre, so no torsion
 is induced — true biaxial bending, torsion, and shear-centre offset
 effects are out of scope for v1 (see spec v1 boundaries).

@@ -31,10 +31,22 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
-from eat.history import write_json_atomically
 from eat.section import Material
+from eat.storage import quarantine, read_json_or_recover, write_json_atomically
 
 DEFAULT_MATERIALS_PATH = Path(__file__).parent / "materials.json"
+
+# Materials is the awkward store to reset: unlike history (empty is the
+# correct default) an empty material list leaves the app unable to
+# analyze anything. It still resets rather than raising, because the
+# alternative is a server that 500s on every route -- but the warning has
+# to say plainly that the list needs restoring, not just that something
+# went wrong.
+_RECOVERY_HINT = (
+    "The material list is now EMPTY, so no analysis can run until it is restored: "
+    "recover the backup file, or re-add materials with `python -m eat.materials add` "
+    "or POST /materials."
+)
 
 _PA_PER_MPA = 1.0e6
 _PA_PER_GPA = 1.0e9
@@ -77,9 +89,25 @@ def _material_to_record(material: Material) -> dict:
 
 
 def load_materials(path: Path | str = DEFAULT_MATERIALS_PATH) -> list[Material]:
-    """Load every material from the JSON file, converted to MPa units."""
-    records = json.loads(Path(path).read_text())
-    return [_record_to_material(r) for r in records]
+    """Load every material from the JSON file, converted to MPa units.
+
+    A file that can't be read, or whose records aren't materials, is
+    quarantined and the list resets to empty rather than raising -- see
+    `_RECOVERY_HINT` and eat.storage. A record that fails `Material`'s own
+    validation (a negative modulus, say) counts as unreadable here: one
+    bad row would otherwise take down every route that resolves a
+    material, with no indication of which row."""
+    records = read_json_or_recover(path, [], "material list", _RECOVERY_HINT)
+    try:
+        return [_record_to_material(r) for r in records]
+    except (TypeError, AttributeError, KeyError, ValueError) as exc:
+        quarantine(
+            path,
+            f"The material list file ({Path(path).name}) could not be read as a list of "
+            f"materials and has been reset: {exc}.",
+            _RECOVERY_HINT,
+        )
+        return []
 
 
 def save_materials(materials: list[Material], path: Path | str = DEFAULT_MATERIALS_PATH) -> None:

@@ -47,7 +47,25 @@ extrusion. Welded parts and buckling-class-B alloys have tighter limits
 wants checking against the standard directly; this is stated in every
 segment's caveats rather than guessed at.
 
-Note the two criteria are not the same and are not meant to be. The
+THE YIELD CAP
+-------------
+Perfect-plate theory has no upper bound, so a stocky wall's elastic
+critical stress comes out far above anything the material can reach -- a
+4mm wall on a 60x40 tube in 6063-T6 gives 2,900 MPa against a 214 MPa
+proof stress. An "elastic safety factor" of 14 built on that is a true
+statement about plate buckling and a misleading statement about the wall,
+which would have yielded at a factor of 1.
+So each wall carries TWO factors, reported side by side and labelled:
+
+    safety_factor           sigma_cr / sigma_applied      (pure buckling)
+    effective_safety_factor min(sigma_cr, f_o) / sigma_applied
+
+The effective one is the wall's real limit and is what `_governing`
+ranks on; the elastic one is kept because it is the answer to "how close
+is this wall to buckling", which is a different question and still worth
+seeing. `yield_governed` says which of the two bound.
+
+Note the two CRITERIA below are not the same and are not meant to be. The
 elastic formula is perfect-plate theory; EN 1999-1-1's limits are
 calibrated to test data and so allow for imperfections and residual
 stress. For 6063-T6 the elastic formula puts the yield-vs-buckling
@@ -97,6 +115,7 @@ import numpy as np
 from shapely.geometry import Point, Polygon
 from shapely.prepared import prep
 
+from eat.profile import validate_profile
 from eat.thickness import (
     ThicknessSample,
     normalized_rings,
@@ -153,7 +172,25 @@ class PlateSegment:
     beta_over_epsilon: float | None
     section_class: int | None  # EN 1999-1-1 class 1-4
     applied_stress: float | None  # MPa, compressive, worst fibre on this wall
-    safety_factor: float | None  # elastic_critical_stress / applied_stress
+    safety_factor: float | None  # ELASTIC: elastic_critical_stress / applied_stress
+
+    # The stress this wall can actually reach, MPa: min(sigma_cr, f_o).
+    # Perfect-plate theory has no upper bound, so a stocky wall comes back
+    # with an elastic critical stress far above the material's proof
+    # stress -- 2,900 MPa on a 4mm wall of a 60x40 tube in 6063-T6, which
+    # yields at 214. The elastic safety factor built on that is a true
+    # statement about plate buckling and a misleading statement about the
+    # wall, because the wall would have yielded long before.
+    yield_capped_stress: float | None
+    # ...and the factor that follows from it. THIS is the limiting number
+    # for the wall; `safety_factor` above stays as the pure buckling
+    # result, and the two are reported side by side rather than one
+    # silently replacing the other.
+    effective_safety_factor: float | None
+    # True when the cap actually bit (sigma_cr > f_o), i.e. this wall is
+    # yield-governed rather than buckling-governed.
+    yield_governed: bool = False
+
     caveats: list[str] = field(default_factory=list)
 
     @property
@@ -183,7 +220,7 @@ class LocalBucklingResult:
             ),
             "",
             f"{'#':>2}  {'b (mm)':>8} {'t (mm)':>7} {'b/t':>7}  {'edges':<26} "
-            f"{'k':>5} {'s_cr (MPa)':>11} {'class':>5} {'SF':>7}",
+            f"{'k':>5} {'s_cr (MPa)':>11} {'class':>5} {'elastic SF':>11} {'eff. SF':>8}",
         ]
         for s in self.segments:
             lines.append(
@@ -192,7 +229,9 @@ class LocalBucklingResult:
                 f"{s.k if s.k is not None else float('nan'):>5.3f} "
                 f"{s.elastic_critical_stress if s.elastic_critical_stress is not None else float('nan'):>11.1f} "
                 f"{s.section_class if s.section_class is not None else 0:>5} "
-                f"{s.safety_factor if s.safety_factor is not None else float('nan'):>7.2f}"
+                f"{s.safety_factor if s.safety_factor is not None else float('nan'):>11.2f} "
+                f"{s.effective_safety_factor if s.effective_safety_factor is not None else float('nan'):>8.2f}"
+                + ("  (yield)" if s.yield_governed else "")
             )
             for caveat in s.caveats:
                 lines.append(f"      ! {caveat}")
@@ -541,9 +580,11 @@ def analyze_local_buckling(
     factors; without them the geometry is still classified, which is the
     part that does not depend on the load case at all.
     """
+    # Same contract as the section engine -- see eat.profile for why this
+    # is not a bare polygon.is_valid test, and why all three engines now
+    # share one definition instead of three.
+    validate_profile(vertices, holes)
     poly = Polygon(vertices, holes or None)
-    if not poly.is_valid:
-        raise ValueError("Profile polygon is self-intersecting or otherwise invalid")
     rings = normalized_rings(vertices, holes)
     step = sample_step(poly)
     samples = wall_like(sample_thickness(poly, rings))
@@ -668,6 +709,20 @@ def analyze_local_buckling(
         safety = (
             sigma_cr / applied if (sigma_cr is not None and applied and applied > 0) else None
         )
+        # Cap the capacity at the proof stress: a wall cannot carry more
+        # than the material can, however stocky the plate is.
+        f_o = material.yield_strength
+        capped = sigma_cr if sigma_cr is None else (min(sigma_cr, f_o) if f_o else sigma_cr)
+        yield_governed = bool(sigma_cr is not None and f_o and sigma_cr > f_o)
+        effective = (
+            capped / applied if (capped is not None and applied and applied > 0) else None
+        )
+        if yield_governed:
+            caveats.append(
+                f"elastic plate buckling would not govern this wall — its critical stress "
+                f"({sigma_cr:,.0f} MPa) is above the {f_o:,.0f} MPa proof stress, so it yields "
+                f"first; the effective safety factor is capped accordingly"
+            )
 
         segments.append(
             PlateSegment(
@@ -685,6 +740,9 @@ def analyze_local_buckling(
                 section_class=cls,
                 applied_stress=applied,
                 safety_factor=safety,
+                yield_capped_stress=capped,
+                effective_safety_factor=effective,
+                yield_governed=yield_governed,
                 caveats=caveats,
             )
         )
@@ -724,11 +782,16 @@ def _applied_stress(plate, section, moment, axial_stress, bending_axis) -> float
 
 
 def _governing(segments: list[PlateSegment]) -> PlateSegment | None:
-    """The wall that governs: lowest safety factor if a load was given,
-    otherwise the worst (highest) class, then the most slender."""
-    rated = [s for s in segments if s.safety_factor is not None]
+    """The wall that governs: lowest EFFECTIVE safety factor if a load was
+    given, otherwise the worst (highest) class, then the most slender.
+
+    Ranked on the yield-capped factor rather than the elastic one because
+    that is the wall's real limit -- ranking on the uncapped elastic
+    factor can nominate a wall that would in fact yield later than another
+    whose elastic factor merely looks worse."""
+    rated = [s for s in segments if s.effective_safety_factor is not None]
     if rated:
-        return min(rated, key=lambda s: s.safety_factor)
+        return min(rated, key=lambda s: s.effective_safety_factor)
     classified = [s for s in segments if s.section_class is not None]
     if classified:
         return max(classified, key=lambda s: (s.section_class, s.slenderness))
@@ -757,6 +820,9 @@ def as_dict(result: LocalBucklingResult) -> dict[str, Any]:
                 "section_class": s.section_class,
                 "applied_stress": s.applied_stress,
                 "safety_factor": s.safety_factor,
+                "yield_capped_stress": s.yield_capped_stress,
+                "effective_safety_factor": s.effective_safety_factor,
+                "yield_governed": s.yield_governed,
                 "caveats": s.caveats,
             }
             for s in result.segments

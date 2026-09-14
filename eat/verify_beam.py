@@ -171,28 +171,128 @@ def run_asymmetric_axis_checks() -> list[Check]:
 
     m_exp = abs(P) * L / 4  # moment doesn't depend on axis
 
+    # --- UNSYMMETRIC BENDING, hand-derived --------------------------------
+    # This section has Ixy = -150,000, so M/Z about a sketch axis is NOT
+    # its bending stress and P L^3 / (48 E Ixx) is NOT its deflection. The
+    # expected values below come from unsymmetric-bending theory worked by
+    # hand, NOT from the tool -- the previous versions of these four checks
+    # compared M/Zxx against a hand-calculated Zxx, which verified the
+    # arithmetic of a simplification against the same simplification and so
+    # could never have detected that the simplification was the wrong
+    # model. That is the mistake being corrected here, so these are written
+    # out in full.
+    #
+    # STRESS. With Mx = M, My = 0 the general linear distribution is
+    #   sigma(x, y) = M (Iyy y - Ixy x) / (Ixx Iyy - Ixy^2)
+    # and since sigma is linear its extreme is at a vertex. Denominator:
+    #   D = (1e6/3)(625000/3) - 150000^2 = (6.25e11 - 2.025e11)/9
+    #     = 4.225e11 / 9
+    # Evaluating (Iyy y - Ixy x) at each vertex, centroid-relative
+    # (centroid is at (15, 20)):
+    #   (-15,-20): -6,416,666.67     (35,-20): +1,083,333.33
+    #   ( 35,-10): +3,166,666.67     (-5,-10): -2,833,333.33
+    #   ( -5, 40): +7,583,333.33 <-- worst    (-15, 40): +6,083,333.33
+    # so the governing fibre is the tip of the tall leg, (-5, 40) from the
+    # centroid, and with M = 250,000 N.mm
+    #   sigma = 250000 * (22,750,000/3) / (4.225e11/9) = 525/13 MPa
+    #         = 40.3846...  (against 30.0 for the old M/Zxx answer)
+    stress_y_exp = 525 / 13
+    #
+    # DEFLECTION. Resolve onto the principal axes. tan(2t) = -2Ixy/(Ixx-Iyy)
+    # = 300000/125000 = 2.4, and 2.4 = 2(2/3)/(1-(2/3)^2), so tan t = 2/3
+    # exactly: cos t = 3/sqrt(13), sin t = 2/sqrt(13), t = 33.690 deg.
+    #   I11 = 270833.33 + 162500 = 1,300,000/3
+    #   I22 = 270833.33 - 162500 =   325,000/3
+    # A load along +y has components c1 = 2/sqrt(13) on e1 and
+    # c2 = 3/sqrt(13) on e2; the e1 component is resisted by I22 and the e2
+    # component by I11. Both midspan maxima coincide, so along the load
+    #   v = (P L^3 / 48E) [ c1^2/I22 + c2^2/I11 ]
+    #     = (312500/3) [ (4/13)(3/325000) + (9/13)(3/1300000) ]
+    #     = (312500/3)(3/676000) = 312500/676000 mm
+    #     = 0.462278...  (against 0.3125 for the old P L^3/(48 E Ixx))
+    v_y_exp = 312500 / 676000
+    # ...and the out-of-plane component, which the symmetric model had no
+    # way to express at all:
+    #   v_t = P (L^3/48E)(6/13)(1/I22 - 1/I11) = 0.332840... mm
+    v_y_transverse_exp = 1000 * (L**3 / (48 * MATERIAL.E)) * (6 / 13) * (
+        3 / 325_000 - 3 / 1_300_000
+    )
+
     res_y = analyze_beam(
         section, MATERIAL, L, BoundaryCondition.SIMPLY_SUPPORTED, [PointLoad(0.5, P, axis=LoadAxis.Y)]
     )
-    stress_y_exp = m_exp / zxx_exp
-    v_y_exp = abs(P) * L**3 / (48 * MATERIAL.E * ixx_exp)
     checks += [
         Check("L-angle Y-axis: load_axis reported as 'y'", 1.0, 1.0 if res_y.load_axis == "y" else 0.0, 1e-9),
         Check("L-angle Y-axis: |M_max|", m_exp, abs(res_y.max_moment), 1e-6),
-        Check("L-angle Y-axis: max bending stress (bends about Ixx)", stress_y_exp, res_y.max_bending_stress, 1e-3),
-        Check("L-angle Y-axis: |v_max|", v_y_exp, abs(res_y.max_deflection), 1e-3),
+        Check("L-angle Y: stress (unsymmetric theory, by hand)", stress_y_exp, res_y.max_bending_stress, 1e-3),
+        Check("L-angle Y: |v_max| along the load (principal axes)", v_y_exp, abs(res_y.max_deflection), 1e-3),
+        Check("L-angle Y: out-of-plane deflection", v_y_transverse_exp, abs(res_y.max_deflection_transverse), 1e-3),
+        # ...and the peak fibre is the tip of the tall leg, not the extreme
+        # fibre in the load direction that M/Zxx implicitly assumed.
+        Check("L-angle Y: peak fibre x, from the centroid", -5.0, res_y.max_bending_stress_point[0], 1e-6),
+        Check("L-angle Y: peak fibre y, from the centroid", 40.0, res_y.max_bending_stress_point[1], 1e-6),
+        # The old M/Z answer must be demonstrably NOT what comes back.
+        Check(
+            "L-angle Y: stress is not the old M/Zxx value (34.6% low)",
+            1.0,
+            1.0 if abs(res_y.max_bending_stress - m_exp / zxx_exp) / (m_exp / zxx_exp) > 0.3 else 0.0,
+            1e-9,
+        ),
     ]
+
+    # Same treatment about the other axis. With Mx = 0, My = M the linear
+    # distribution is sigma = M (Ixx x - Ixy y) / D; evaluated at the six
+    # vertices the worst is (35, -10) from the centroid at 30,500,000/3, so
+    #   sigma = 250000 * (30,500,000/3) / (4.225e11/9) = 54.142... MPa
+    # and, with c1 = 3/sqrt(13), c2 = -2/sqrt(13),
+    #   v = (312500/3)[ (9/13)(3/325000) + (4/13)(3/1300000) ]
+    #     = (312500/3)(6/845000) = 0.739645 mm
+    stress_x_exp = 250_000 * (30_500_000 / 3) / (4.225e11 / 9)
+    v_x_exp = (312500 / 3) * (6 / 845_000)
 
     res_x = analyze_beam(
         section, MATERIAL, L, BoundaryCondition.SIMPLY_SUPPORTED, [PointLoad(0.5, P, axis=LoadAxis.X)]
     )
-    stress_x_exp = m_exp / zyy_exp
-    v_x_exp = abs(P) * L**3 / (48 * MATERIAL.E * iyy_exp)
     checks += [
         Check("L-angle X-axis: load_axis reported as 'x'", 1.0, 1.0 if res_x.load_axis == "x" else 0.0, 1e-9),
         Check("L-angle X-axis: |M_max|", m_exp, abs(res_x.max_moment), 1e-6),
-        Check("L-angle X-axis: max bending stress (bends about Iyy)", stress_x_exp, res_x.max_bending_stress, 1e-3),
-        Check("L-angle X-axis: |v_max|", v_x_exp, abs(res_x.max_deflection), 1e-3),
+        Check("L-angle X: stress (unsymmetric theory, by hand)", stress_x_exp, res_x.max_bending_stress, 1e-3),
+        Check("L-angle X: |v_max| along the load (principal axes)", v_x_exp, abs(res_x.max_deflection), 1e-3),
+        Check("L-angle X: peak fibre x, from the centroid", 35.0, res_x.max_bending_stress_point[0], 1e-6),
+        Check("L-angle X: peak fibre y, from the centroid", -10.0, res_x.max_bending_stress_point[1], 1e-6),
+    ]
+
+    # Principal axes themselves, hand-derived above.
+    checks += [
+        Check("L-angle: principal angle = atan(2/3)", math.degrees(math.atan(2 / 3)), res_y.principal_angle_deg, 1e-6),
+        Check("L-angle: I11 = 1,300,000/3", 1_300_000 / 3, res_y.i11, 1e-4),
+        Check("L-angle: I22 = 325,000/3", 325_000 / 3, res_y.i22, 1e-4),
+        Check("L-angle: asymmetry = |Ixy|/sqrt(Ixx*Iyy)", 150_000 / math.sqrt(ixx_exp * iyy_exp), res_y.asymmetry, 1e-4),
+        # I11 + I22 must equal Ixx + Iyy -- the trace is rotation-invariant.
+        Check("L-angle: I11 + I22 == Ixx + Iyy (invariant)", ixx_exp + iyy_exp, res_y.i11 + res_y.i22, 1e-9),
+    ]
+
+    # A symmetric section must be left exactly as it was: no out-of-plane
+    # response, and the classical P L^3 / (48 E I) deflection.
+    rect = analyze_section([(0, 0), (50, 0), (50, 100), (0, 100)], MATERIAL, mesh_size=1.0)
+    res_sym = analyze_beam(
+        rect, MATERIAL, L, BoundaryCondition.SIMPLY_SUPPORTED, [PointLoad(0.5, P, axis=LoadAxis.Y)]
+    )
+    checks += [
+        Check("Symmetric rectangle: asymmetry is zero", 0.0, res_sym.asymmetry, 1e-12),
+        Check("Symmetric rectangle: no out-of-plane deflection", 0.0, res_sym.max_deflection_transverse, 1e-12),
+        Check(
+            "Symmetric rectangle: deflection is still P L^3/(48 E Ixx)",
+            abs(P) * L**3 / (48 * MATERIAL.E * (50.0 * 100.0**3 / 12)),
+            abs(res_sym.max_deflection),
+            1e-3,
+        ),
+        Check(
+            "Symmetric rectangle: stress is still M/Z",
+            (abs(P) * L / 4) / (50.0 * 100.0**2 / 6),
+            res_sym.max_bending_stress,
+            1e-3,
+        ),
     ]
 
     # The whole point of the axis selector: X and Y must give genuinely

@@ -38,7 +38,14 @@ energy minimisation for the plate-buckling coefficients, and bisection
 for the medial-axis thickness. Those four engines came back clean.
 
 Seven unambiguous bugs it *did* find are fixed and committed (F1–F7 in
-the commit message). The two worth carrying forward as knowledge:
+commit `1f6fca6`). A second batch then acted on the judgment calls the
+sweep had deliberately left alone — unsymmetric bending, the local-
+buckling yield cap, history retention, corrupt-store recovery, a busy
+indicator, shared profile validation, an LRU on the section cache, the
+tensile-axial and zero-load reporting states, and the PDF `page=0` bug.
+See that commit's message; the conventions it established are below.
+
+The two findings worth carrying forward as knowledge:
 
 - **`min(Ixx, Iyy)` is not the weak axis.** It only coincides with the
   least principal second moment when `Ixy = 0`. Euler buckling used it
@@ -79,11 +86,12 @@ commit:
   `eat/verify_pdf.py` and parts of `verify_api.py`/`verify_frontend.py`
   (those skip/fail gracefully if missing) — keep them in the working
   directory.
-- `eat/history.json` carries 44 test-fixture entries from an earlier
-  crashed debug run (not Liam's real usage — all same-day, all match
-  automated-test geometry/materials). Left untouched since it's Liam's
-  runtime data; wipe from the History panel or delete the file if he
-  wants it cleared. `eat/baseline.json` is at its correct default
+- `eat/history.json` sits at 48 entries, which are test fixtures from an
+  earlier crashed debug run rather than Liam's real usage (all same-day,
+  all matching automated-test geometry/materials). `HISTORY_MAX_ENTRIES`
+  is 25, so the next analysis trims it to the newest 25 and it settles
+  there — Liam confirmed those entries are not worth preserving, so this
+  needs no action. `eat/baseline.json` is at its correct default
   (`{"type": "builtin"}`).
 - `EAT-audit-sheet.html` in the project root — the QA sweep's findings
   as a standalone page, written for Liam to read. Untracked on purpose;
@@ -115,8 +123,22 @@ commit:
   A throwaway Playwright script outside this suite must snapshot/restore
   `eat/history.json` and `eat/baseline.json` itself — the suite's own
   discipline doesn't cover scripts that bypass it.
+- **One profile-validity contract**: `eat/profile.py`'s `validate_profile`
+  is shared by the section, suggestions and local-buckling engines. Don't
+  add a fourth definition, and don't "simplify" it to `polygon.is_valid` —
+  its docstring says which real case that would break.
+- **Local state lives behind `eat/storage.py`**: atomic writes, and a
+  store that can't be decoded is quarantined (renamed aside, never
+  deleted) and reset with a warning on `GET /warnings`, rather than
+  500-ing every route. New JSON-backed state should go through it.
+- **Verification scripts snapshot the history FILE, not its entry ids.**
+  With `HISTORY_MAX_ENTRIES` in force, entries a test adds *evict* the
+  user's oldest runs, and deleting the new ones afterwards cannot bring
+  those back. `verify_api.py` and `verify_frontend.py` both restore bytes.
 - **"Frozen, not recomputed"**: a reloaded history entry always shows the
   exact stored result, never a live recompute — guarantees reproducibility.
+  It is also why `HISTORY_MAX_ENTRIES` drops whole entries rather than
+  trimming old ones to summaries.
 - **"Always fresh"**: derived comparisons (solid-fill, baseline,
   suggestions) always recompute live, even for a reloaded history entry.
 - Work style: implement → verify rigorously against known/hand-calculated
@@ -125,6 +147,28 @@ commit:
   interpretation-heavy (visual/layout changes, PDF geometry reading).
 
 ## Known open items (not yet built)
+
+- **Mesh density tracks the bounding box, not feature size** — deferred
+  from the QA sweep's batch as a performance-engineering task in its own
+  right. `analyze_section` picks `mesh_size = bbox_area / 2000`, which
+  fixes the element count rather than scaling with the features that need
+  resolving. Measured consequence: a plain 4-vertex 50x100 rectangle takes
+  1.15 s while the 246-vertex KJN profile takes 0.96 s, and a real
+  929-vertex supplier profile takes 3.35 s — the dominant term in the ~5 s
+  a full pass costs. A busy indicator now covers the symptom; the fix is
+  to size elements from local wall thickness instead. Re-measure before
+  and after, on the supplier PDFs in the project root.
+- **Repo is private, so README step 1 fails for anyone else** — the QA
+  sweep confirmed `git clone https://github.com/liam-boone/EAT.git` gives
+  a 404 unauthenticated (`git ls-remote` succeeds with Liam's own
+  credentials). Either make it public or document that collaborator
+  access has to be granted first. Liam's call; untouched.
+- **README omits four shipped features** — PDF import, Design Review,
+  History and the baseline comparison appear nowhere in it, and the "v1
+  scope" section still says "DXF import/export only", which reads as a
+  statement that PDF import isn't supported. Bigger than the "v1 scope
+  framing" rewrite listed under the release checklist below. Liam has the
+  findings; the framing decision is his.
 
 - **Notches that leave a manufacturable wall** — the part of the
   narrow-notch backlog item that is *not* solved. A slot leaving 1.5mm in

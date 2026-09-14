@@ -336,12 +336,59 @@ def run_axial_material_property_check() -> list[Check]:
     return checks
 
 
+def run_recovery_checks() -> list[Check]:
+    """A damaged baseline.json resets to the built-in rather than raising.
+
+    This is a one-line setting; 500-ing every comparison over it would be
+    absurd. Anything that isn't a JSON object counts as damaged, because
+    the setting is read with `.get` and a list or a bare number would
+    otherwise raise an AttributeError deeper in."""
+    import tempfile
+
+    from eat.storage import clear_store_warnings, store_warnings
+
+    checks: list[Check] = []
+    cases = {
+        "truncated": '{"type": "bui',
+        "empty file": "",
+        "a JSON array, not an object": "[]",
+        "a bare number": "42",
+    }
+    for label, damage in cases.items():
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "baseline.json"
+            path.write_text(damage)
+            clear_store_warnings()
+            try:
+                setting = get_baseline_setting(path)
+                raised = None
+            except Exception as exc:  # noqa: BLE001
+                setting, raised = None, exc
+            checks.append(
+                Check(f"Recovery ({label}): loads without raising", raised is None,
+                      f"{type(raised).__name__}: {raised}" if raised else ""))
+            if raised is not None:
+                continue
+            checks.append(
+                Check(f"Recovery ({label}): resets to the built-in baseline",
+                      setting == {"type": "builtin"}, f"{setting}"))
+            checks.append(
+                Check(f"Recovery ({label}): the damaged file is kept, not deleted",
+                      any(".corrupt-" in q.name for q in Path(tmp).iterdir()),
+                      f"{[q.name for q in Path(tmp).iterdir()]}"))
+            checks.append(
+                Check(f"Recovery ({label}): a warning is recorded", bool(store_warnings())))
+    clear_store_warnings()
+    return checks
+
+
 def main() -> int:
     checks = (
         run_setting_persistence_checks()
         + run_resolution_checks()
         + run_hand_checkable_comparison_check()
         + run_axial_material_property_check()
+        + run_recovery_checks()
     )
     return _report(checks)
 

@@ -50,6 +50,7 @@ from eat.local_buckling import (
     epsilon,
 )
 from eat.materials import get_material
+from eat.section import analyze_section
 
 NU_TEXTBOOK = 0.3
 
@@ -479,6 +480,124 @@ def run_consistency_checks() -> list[Check]:
     return checks
 
 
+def run_yield_cap_checks() -> list[Check]:
+    """The effective (yield-capped) safety factor.
+
+    Perfect-plate theory has no upper bound, so a stocky wall's elastic
+    critical stress runs far past anything the material can reach and the
+    elastic safety factor built on it is reassuring about the wrong
+    failure mode. Each wall therefore carries two factors; these check
+    that both are right and that the right one governs.
+
+    Arithmetic is done here from `elastic_critical_stress` and the
+    material's own proof stress rather than read back from the segment,
+    so the cap is checked against the definition, not against itself.
+    """
+    material = get_material("6063-T6 Aluminum (Extruded)")
+    f_o = material.yield_strength
+    checks: list[Check] = []
+
+    # A 40x40 tube with 6mm walls: b/t ~ 5.7, far too stocky to buckle
+    # elastically before it yields.
+    t = 6.0
+    outer = [(0, 0), (40, 0), (40, 40), (0, 40)]
+    inner = [(t, t), (40 - t, t), (40 - t, 40 - t), (t, 40 - t)]
+    stocky_section = analyze_section(outer, material, mesh_size=0.5, holes=[inner])
+    stocky = analyze_local_buckling(
+        outer, [inner], material,
+        applied_axial_stress=20_000 / stocky_section.area,
+        moment=0.0, bending_axis="y", section=stocky_section,
+    )
+    rated = [s for s in stocky.segments if s.effective_safety_factor is not None]
+    checks.append(
+        Check("Stocky tube: every wall is rated", len(rated) == len(stocky.segments) and bool(rated),
+              f"{len(rated)}/{len(stocky.segments)}")
+    )
+    for s in rated:
+        checks.append(
+            Check(
+                f"Stocky wall {s.index}: sigma_cr exceeds the proof stress",
+                s.elastic_critical_stress > f_o,
+                f"sigma_cr={s.elastic_critical_stress:,.0f} vs f_o={f_o:,.0f}",
+            )
+        )
+        checks.append(
+            Check(
+                f"Stocky wall {s.index}: capacity capped at f_o",
+                _close(s.yield_capped_stress, f_o, 1e-12),
+                f"capped={s.yield_capped_stress}",
+            )
+        )
+        checks.append(
+            Check(
+                f"Stocky wall {s.index}: effective SF = f_o / applied",
+                _close(s.effective_safety_factor, f_o / s.applied_stress, 1e-9),
+                f"{s.effective_safety_factor} vs {f_o / s.applied_stress}",
+            )
+        )
+        checks.append(
+            Check(
+                f"Stocky wall {s.index}: flagged yield-governed",
+                s.yield_governed is True,
+            )
+        )
+        checks.append(
+            Check(
+                f"Stocky wall {s.index}: effective SF is far below the elastic one",
+                s.effective_safety_factor < s.safety_factor / 10,
+                f"elastic={s.safety_factor:,.1f}, effective={s.effective_safety_factor:,.2f}",
+            )
+        )
+        checks.append(
+            Check(
+                f"Stocky wall {s.index}: the elastic SF itself is unchanged",
+                _close(s.safety_factor, s.elastic_critical_stress / s.applied_stress, 1e-9),
+            )
+        )
+
+    # A slender wall, where sigma_cr < f_o and the cap must NOT bite: the
+    # two factors have to agree exactly, or the cap is changing answers it
+    # has no business touching.
+    t = 1.0
+    outer = [(0, 0), (120, 0), (120, 120), (0, 120)]
+    inner = [(t, t), (120 - t, t), (120 - t, 120 - t), (t, 120 - t)]
+    slender_section = analyze_section(outer, material, mesh_size=8.0, holes=[inner])
+    slender = analyze_local_buckling(
+        outer, [inner], material,
+        applied_axial_stress=20_000 / slender_section.area,
+        moment=0.0, bending_axis="y", section=slender_section,
+    )
+    slender_rated = [s for s in slender.segments if s.effective_safety_factor is not None]
+    checks.append(Check("Slender tube: walls are rated", bool(slender_rated), f"{len(slender_rated)}"))
+    for s in slender_rated:
+        checks.append(
+            Check(
+                f"Slender wall {s.index}: sigma_cr is below the proof stress",
+                s.elastic_critical_stress < f_o,
+                f"sigma_cr={s.elastic_critical_stress:,.1f} vs f_o={f_o:,.0f}",
+            )
+        )
+        checks.append(
+            Check(
+                f"Slender wall {s.index}: cap does not bite — the two SFs agree",
+                _close(s.effective_safety_factor, s.safety_factor, 1e-12)
+                and s.yield_governed is False,
+                f"elastic={s.safety_factor}, effective={s.effective_safety_factor}",
+            )
+        )
+
+    # ...and the governing wall is chosen on the EFFECTIVE factor.
+    if stocky.governing is not None:
+        checks.append(
+            Check(
+                "Governing wall is the lowest EFFECTIVE safety factor",
+                stocky.governing.effective_safety_factor
+                == min(s.effective_safety_factor for s in rated),
+            )
+        )
+    return checks
+
+
 def main() -> int:
     checks = (
         run_eigenvalue_checks()
@@ -486,6 +605,7 @@ def main() -> int:
         + run_eurocode_checks()
         + run_geometry_checks()
         + run_consistency_checks()
+        + run_yield_cap_checks()
     )
     width = max(len(c.label) for c in checks) + 2
     all_passed = True

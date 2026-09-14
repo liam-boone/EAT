@@ -158,12 +158,17 @@ import ezdxf
 from playwright.sync_api import sync_playwright
 
 from eat.beam import BoundaryCondition, PointLoad, analyze_beam
+from eat.history import DEFAULT_HISTORY_PATH
 from eat.local_buckling import analyze_local_buckling
 from eat.materials import get_material
 from eat.section import analyze_section
 from eat.verify_local_buckling import rounded_rect
 
 PORT = 8799
+# Columns in the Local (Plate) Buckling table. Named because several
+# positional assertions below index into it, and it gained the
+# yield-capped "Effective SF" column alongside the elastic one.
+LB_COLUMNS = 11
 BASE_URL = f"http://127.0.0.1:{PORT}"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -259,7 +264,8 @@ def main() -> int:
     captured: dict[str, dict] = {}
 
     server = start_server()
-    history_baseline_ids: set[str] = set()
+    history_file_before: bytes | None = None
+    history_count_before = 0
     baseline_setting_before: dict | None = None
     state_snapshotted = False  # gates the restore in the finally below
     try:
@@ -271,11 +277,20 @@ def main() -> int:
         # Every flow below hits POST /section, /section/from-dxf, and/or
         # /beam, each of which logs to the real eat/history.json (the same
         # file an actual user's runs live in) as a side effect -- snapshot
-        # what's there before touching it so it can all be swept up at the
-        # end, same restore-to-original-state discipline as verify_api.py.
-        # Same for the baseline *selection* itself (eat/baseline.json),
-        # which the History flow's "set as baseline" actions change.
-        history_baseline_ids = {e["id"] for e in _get_json(BASE_URL + "/history")}
+        # it before touching it so it can be put back at the end, same
+        # restore-to-original-state discipline as verify_api.py. Same for
+        # the baseline *selection* itself (eat/baseline.json), which the
+        # History flow's "set as baseline" actions change.
+        #
+        # The snapshot is the FILE, not the set of ids. Deleting whatever
+        # is new at the end was sufficient only while history grew without
+        # bound; with `HISTORY_MAX_ENTRIES` in force the entries these
+        # flows add EVICT the user's oldest runs, and deleting afterwards
+        # cannot bring those back.
+        history_file_before = (
+            DEFAULT_HISTORY_PATH.read_bytes() if DEFAULT_HISTORY_PATH.exists() else None
+        )
+        history_count_before = len(_get_json(BASE_URL + "/history"))
         baseline_setting_before = _get_json(BASE_URL + "/baseline")
         state_snapshotted = True
 
@@ -850,7 +865,7 @@ def main() -> int:
                     checks.append(
                         Check(
                             "Local buckling: an unclassifiable wall shows 'Not classified', not blank",
-                            len(u_cells) == 10 and u_cells[1] == "Not classified",
+                            len(u_cells) == LB_COLUMNS and u_cells[1] == "Not classified",
                             f"{u_cells}",
                         )
                     )
@@ -858,11 +873,12 @@ def main() -> int:
                         Check(
                             "Local buckling: an unclassifiable wall's k / sigma_cr / class / SF read "
                             "'—', not blank and not a fabricated number",
-                            len(u_cells) == 10
+                            len(u_cells) == LB_COLUMNS
                             and u_cells[5] == "—"
                             and u_cells[6] == "—"
                             and u_cells[7] == "—"
-                            and u_cells[9] == "—",
+                            and u_cells[9] == "—"
+                            and u_cells[10] == "—",
                             f"{u_cells}",
                         )
                     )
@@ -887,7 +903,7 @@ def main() -> int:
                         Check(
                             "Local buckling: a classifiable wall shows a real edge condition, not "
                             "'Not classified'",
-                            len(c_cells) == 10
+                            len(c_cells) == LB_COLUMNS
                             and c_cells[1] == _title_case_label(c["supports_label"])
                             and c_cells[5] != "—",
                             f"{c_cells}",
@@ -1626,8 +1642,10 @@ def main() -> int:
                             f'#local-buckling-table tr[data-wall="{seg["index"]}"]:not(.local-buckling-table__caveat)'
                         )
                         cells = row.locator("td").all_inner_texts()
-                        if len(cells) != 10:
-                            dom_mismatches.append(f"wall {seg['index']}: expected 10 cells, got {len(cells)}")
+                        if len(cells) != LB_COLUMNS:
+                            dom_mismatches.append(
+                                f"wall {seg['index']}: expected {LB_COLUMNS} cells, got {len(cells)}"
+                            )
                             continue
 
                         def parse(text):
@@ -1657,6 +1675,7 @@ def main() -> int:
                             ("elastic_critical_stress", 6, 1e-2),
                             ("applied_stress", 8, 1e-2),
                             ("safety_factor", 9, 1.5e-2),
+                            ("effective_safety_factor", 10, 1.5e-2),
                         ):
                             api_val = seg[key]
                             shown = parse(cells[col])
@@ -1747,6 +1766,259 @@ def main() -> int:
                     f"{containment}",
                 )
             )
+
+            # --- Flow 8: the two safety factors, and the states that
+            # aren't a number ---
+            # Still on the tube from flow 7, which has both factors.
+            lb_headers = [h.strip().upper() for h in page.locator("#local-buckling-table th").all_inner_texts()]
+            checks.append(
+                Check(
+                    "Local buckling: elastic and yield-capped factors are separate, named columns",
+                    "ELASTIC SF" in lb_headers and "EFFECTIVE SF" in lb_headers,
+                    f"{lb_headers}",
+                )
+            )
+            lb_api = captured.get("/beam", {}).get("local_buckling") or {}
+            rated_api = [s for s in lb_api.get("segments", []) if s.get("effective_safety_factor") is not None]
+            if rated_api:
+                row = page.locator("#local-buckling-table tr[data-wall]:not(.local-buckling-table__caveat)").first
+                cells = [c.strip() for c in row.locator("td").all_inner_texts()]
+                seg = next(s for s in lb_api["segments"] if str(s["index"]) == cells[0])
+                checks.append(
+                    Check(
+                        "Local buckling: the two displayed factors match the API's two values",
+                        _rel_close(float(cells[-2].replace(",", "")), seg["safety_factor"], 5e-3)
+                        and _rel_close(float(cells[-1].replace(",", "")), seg["effective_safety_factor"], 5e-3),
+                        f"displayed elastic={cells[-2]}, effective={cells[-1]}; "
+                        f"api={seg['safety_factor']}, {seg['effective_safety_factor']}",
+                    )
+                )
+                # The effective factor can never exceed the elastic one --
+                # capping capacity can only lower it.
+                checks.append(
+                    Check(
+                        "Local buckling: effective SF never exceeds the elastic SF",
+                        all(s["effective_safety_factor"] <= s["safety_factor"] * (1 + 1e-9) for s in rated_api),
+                        f"{[(s['safety_factor'], s['effective_safety_factor']) for s in rated_api]}",
+                    )
+                )
+
+            # R8: a TENSILE axial load must suppress the buckling check
+            # rather than reporting a negative "safety factor".
+            page.fill("#input-axial", "-4000")
+            captured.pop("/beam", None)
+            page.click("#btn-analyze-beam")
+            page.wait_for_selector("#beam-results:not([hidden])", timeout=15000)
+            page.wait_for_timeout(200)
+            buckling_text = page.locator("#beam-buckling-grid").inner_text()
+            checks.append(
+                Check(
+                    "Tensile axial load: buckling reads 'N/A — tension', not a negative factor",
+                    "N/A" in buckling_text and "tension" in buckling_text.lower()
+                    and "-" not in buckling_text.split("EULER SAFETY FACTOR")[-1][:24],
+                    f"{buckling_text!r}",
+                )
+            )
+            checks.append(
+                Check(
+                    "Tensile axial load: the API suppresses the factor and says why",
+                    (captured.get("/beam", {}).get("buckling_status") == "tension")
+                    and captured.get("/beam", {}).get("buckling_safety_factor") is None,
+                    f"status={captured.get('/beam', {}).get('buckling_status')}",
+                )
+            )
+            # ...and the Euler LOAD itself is still reported, since it is a
+            # property of the profile and length, not of the load case.
+            checks.append(
+                Check(
+                    "Tensile axial load: the Euler buckling load is still shown",
+                    "EULER BUCKLING LOAD" in buckling_text.upper(),
+                )
+            )
+
+            # R10: zero load -> the safety factor is INFINITE, which is a
+            # different fact from "this material has no yield strength".
+            # Both used to render as a bare "n/a".
+            page.fill("#input-axial", "")
+            loads = page.locator("#point-loads-list input")
+            loads.nth(1).fill("0")
+            captured.pop("/beam", None)
+            page.click("#btn-analyze-beam")
+            page.wait_for_selector("#beam-results:not([hidden])", timeout=15000)
+            page.wait_for_timeout(200)
+            summary_text = page.locator("#beam-summary-grid").inner_text()
+            checks.append(
+                Check(
+                    "Zero load: the bending safety factor reads as infinite, with the reason",
+                    "∞" in summary_text and "no bending stress" in summary_text.lower(),
+                    f"{summary_text[:260]!r}",
+                )
+            )
+            checks.append(
+                Check(
+                    "Zero load: the API distinguishes it from a missing yield strength",
+                    captured.get("/beam", {}).get("safety_factor_status") == "no_stress",
+                    f"status={captured.get('/beam', {}).get('safety_factor_status')}",
+                )
+            )
+
+            # --- Flow 9: unsymmetric bending is visible for an L-angle ---
+            page.click("#btn-clear")
+            page.set_input_files(
+                "#dxf-file-input", str(PROJECT_ROOT / "eat" / "fixtures" / "l_angle_50x50x5.dxf")
+            )
+            page.wait_for_selector("#section-results:not([hidden])", timeout=15000)
+            page.fill("#input-length", "1000")
+            existing = page.locator("#point-loads-list input")
+            if existing.count() >= 2:
+                existing.nth(1).fill("-500")
+            captured.pop("/beam", None)
+            page.click("#btn-analyze-beam")
+            page.wait_for_selector("#beam-results:not([hidden])", timeout=15000)
+            page.wait_for_timeout(200)
+            beam_api = captured.get("/beam", {})
+            checks.append(
+                Check(
+                    "L-angle: the API reports a non-zero asymmetry and out-of-plane deflection",
+                    beam_api.get("asymmetry", 0) > 0.1
+                    and abs(beam_api.get("max_deflection_transverse", 0)) > 1e-6,
+                    f"asymmetry={beam_api.get('asymmetry')}, "
+                    f"transverse={beam_api.get('max_deflection_transverse')}",
+                )
+            )
+            summary_text = page.locator("#beam-summary-grid").inner_text().upper()
+            checks.append(
+                Check(
+                    "L-angle: the out-of-plane deflection is surfaced, not silently dropped",
+                    "OUT-OF-PLANE DEFLECTION" in summary_text,
+                    f"{summary_text[:240]!r}",
+                )
+            )
+            checks.append(
+                Check(
+                    "L-angle: the peak stress names the fibre it acts on",
+                    "FROM CENTROID" in summary_text,
+                    f"{summary_text[:240]!r}",
+                )
+            )
+            # ...and a SYMMETRIC profile must not grow that tile.
+            page.click("#btn-clear")
+            page.set_input_files(
+                "#dxf-file-input", str(PROJECT_ROOT / "eat" / "fixtures" / "rectangle_50x100.dxf")
+            )
+            page.wait_for_selector("#section-results:not([hidden])", timeout=15000)
+            page.fill("#input-length", "1000")
+            page.click("#btn-analyze-beam")
+            page.wait_for_selector("#beam-results:not([hidden])", timeout=15000)
+            page.wait_for_timeout(200)
+            checks.append(
+                Check(
+                    "Symmetric rectangle: no out-of-plane tile (it would be identically zero)",
+                    "OUT-OF-PLANE" not in page.locator("#beam-summary-grid").inner_text().upper(),
+                )
+            )
+
+            # --- Flow 10: the busy indicator, and the double-click guard ---
+            # A real profile takes 1-3 s; without an indicator that reads as
+            # a dead click. Caught by holding /section back in the page.
+            page.evaluate(
+                """
+                () => {
+                  const real = window.fetch;
+                  window.fetch = function (input, init) {
+                    const url = typeof input === 'string' ? input : (input && input.url) || '';
+                    if ((url.endsWith('/section') || url.endsWith('/section/from-dxf'))
+                        && (init || {}).method === 'POST') {
+                      return real.apply(this, arguments)
+                        .then(r => new Promise(res => setTimeout(() => res(r), 1200)));
+                    }
+                    return real.apply(this, arguments);
+                  };
+                }
+                """
+            )
+            page.click("#btn-clear")
+            page.set_input_files(
+                "#dxf-file-input", str(PROJECT_ROOT / "eat" / "fixtures" / "l_angle_50x50x5.dxf")
+            )
+            page.wait_for_timeout(350)
+            checks.append(
+                Check(
+                    "Busy indicator: visible while a section analysis is in flight",
+                    page.locator("#busy-indicator").is_visible(),
+                    page.locator("#busy-indicator").get_attribute("class") or "",
+                )
+            )
+            page.wait_for_selector("#section-results:not([hidden])", timeout=20000)
+            page.wait_for_function(
+                "() => document.getElementById('busy-indicator').hidden", timeout=20000
+            )
+            checks.append(
+                Check(
+                    "Busy indicator: cleared once every in-flight request has finished",
+                    page.locator("#busy-indicator").is_hidden(),
+                )
+            )
+            # R4's user-facing half: the app has to ASK whether any local
+            # state file had to be reset on startup. A reset material list
+            # leaves it unable to analyze anything, so silence there would
+            # be baffling. (What the warnings say, and that a damaged store
+            # resets rather than 500-ing, is covered in verify_history.py /
+            # verify_materials.py / verify_baseline.py.)
+            with page.expect_request(lambda r: r.url.endswith("/warnings"), timeout=15000):
+                page.reload(wait_until="networkidle")
+            checks.append(Check("Startup asks the server whether any local state was reset", True))
+            page.wait_for_selector("#material-select:not([disabled])", timeout=15000)
+            checks.append(
+                Check(
+                    "...and with healthy stores it shows no warning banner",
+                    page.locator("#error-banner").is_hidden(),
+                    page.locator("#error-banner-text").inner_text(),
+                )
+            )
+
+            # O7: a double-click must place ONE vertex, not two coincident
+            # ones. The engine accepts coincident vertices, so this is about
+            # the drawing and the vertex count telling the truth.
+            bbox = page.locator("#sketch-canvas").bounding_box()
+            page.mouse.dblclick(bbox["x"] + 120, bbox["y"] + 120)
+            page.wait_for_timeout(200)
+            after_dblclick_undo_disabled = page.locator("#btn-undo").is_disabled()
+            page.click("#btn-undo")
+            page.wait_for_timeout(150)
+            checks.append(
+                Check(
+                    "Double-click on the canvas places exactly one vertex",
+                    (not after_dblclick_undo_disabled)
+                    and page.locator("#btn-undo").is_disabled(),
+                    f"undo enabled after dblclick={not after_dblclick_undo_disabled}, "
+                    f"sketch empty after one undo={page.locator('#btn-undo').is_disabled()}",
+                )
+            )
+            # ...while two genuinely separate clicks still place two.
+            page.mouse.click(bbox["x"] + 60, bbox["y"] + 60)
+            page.wait_for_timeout(120)
+            page.mouse.click(bbox["x"] + 200, bbox["y"] + 60)
+            page.wait_for_timeout(120)
+            page.click("#btn-undo")
+            page.wait_for_timeout(120)
+            checks.append(
+                Check(
+                    "...while two separate clicks still place two vertices",
+                    not page.locator("#btn-undo").is_disabled(),
+                )
+            )
+            page.click("#btn-clear")
+
+            # Leave a real profile on screen: the layout checks and the
+            # final screenshots below both need the design-review panel
+            # rendered, and this flow would otherwise end on a blank canvas.
+            page.set_input_files(
+                "#dxf-file-input", str(PROJECT_ROOT / "eat" / "fixtures" / "rectangle_50x100.dxf")
+            )
+            page.wait_for_selector("#section-results:not([hidden])", timeout=20000)
+            page.wait_for_selector("#suggestions-section:not([hidden])", timeout=20000)
+
 
             # --- Layout: 16:9 / 16:10 desktop and tablet ---
             # The sweep this pass was aimed at, checked at each target size
@@ -1878,7 +2150,7 @@ def main() -> int:
         # has had its chance to run.
         try:
             if state_snapshotted:
-                _restore_state(checks, history_baseline_ids, baseline_setting_before)
+                _restore_state(checks, history_file_before, history_count_before, baseline_setting_before)
         except Exception as exc:  # never mask the original failure
             checks.append(Check("History/baseline restored to pre-test state", False, repr(exc)))
         finally:
@@ -1892,26 +2164,27 @@ def main() -> int:
 
 
 def _restore_state(
-    checks: list[Check], history_baseline_ids: set[str], baseline_setting_before: dict | None
+    checks: list[Check],
+    history_file_before: bytes | None,
+    history_count_before: int,
+    baseline_setting_before: dict | None,
 ) -> None:
     """Put eat/history.json and eat/baseline.json back exactly as they were
-    before this run. Sweeps up every history entry any flow created (sketch,
-    DXF import and beam analysis each log one; loading/deleting in flow 4
-    deliberately don't) -- same discipline verify_api.py applies to the same
-    file -- then restores whichever baseline was selected, since the
-    baseline flow deliberately changes it. The entry that setting referenced,
-    if any, predates this run and so is in `history_baseline_ids`, untouched
-    by the sweep."""
-    history_after = _get_json(BASE_URL + "/history")
-    for e in history_after:
-        if e["id"] not in history_baseline_ids:
-            _delete(f"{BASE_URL}/history/{e['id']}")
+    before this run, by restoring the snapshotted file rather than deleting
+    the entries these flows added -- with `HISTORY_MAX_ENTRIES` in force
+    those additions evict the user's oldest runs, which deleting cannot
+    undo. Then restore whichever baseline was selected, since the baseline
+    flow deliberately changes it."""
+    if history_file_before is None:
+        DEFAULT_HISTORY_PATH.unlink(missing_ok=True)
+    else:
+        DEFAULT_HISTORY_PATH.write_bytes(history_file_before)
     history_final_count = len(_get_json(BASE_URL + "/history"))
     checks.append(
         Check(
             "History file restored to its pre-test state",
-            history_final_count == len(history_baseline_ids),
-            f"baseline={len(history_baseline_ids)}, final={history_final_count}",
+            history_final_count == history_count_before,
+            f"before={history_count_before}, after={history_final_count}",
         )
     )
 

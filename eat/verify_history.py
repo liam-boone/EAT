@@ -22,13 +22,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from eat.history import (
+    HISTORY_MAX_ENTRIES,
     add_entry,
     delete_entry,
     get_entry,
     list_summaries,
     load_history,
-    write_json_atomically,
 )
+from eat.storage import clear_store_warnings, store_warnings, write_json_atomically
 
 
 @dataclass
@@ -199,7 +200,131 @@ def main() -> int:
             checks.append(Check("get_entry: deleted id raises KeyError", True))
 
     checks += _atomic_write_checks()
+    checks += _retention_cap_checks()
+    checks += _recovery_checks()
     return _report(checks)
+
+
+def _retention_cap_checks() -> list[Check]:
+    """The log keeps only the most recent HISTORY_MAX_ENTRIES runs.
+
+    Uncapped, every write rewrote the whole file, so the cost of an
+    analysis grew with the log behind it -- 0.39 ms per stored entry,
+    which reached 392 ms added to every POST /section and /beam at 1,000
+    entries, with the file at 15 MB. The cap drops WHOLE entries rather
+    than trimming old ones to summaries, because a partial entry could
+    not honour the "frozen, not recomputed" guarantee."""
+    checks: list[Check] = []
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "history.json"
+        made = [
+            add_entry("6061", [(0, 0), (i + 3, 0), (i + 3, 5)], None, {"area": float(i)}, path=path)
+            for i in range(HISTORY_MAX_ENTRIES + 12)
+        ]
+        entries = load_history(path)
+        checks.append(
+            Check(
+                f"Retention: the log stops growing at HISTORY_MAX_ENTRIES ({HISTORY_MAX_ENTRIES})",
+                len(entries) == HISTORY_MAX_ENTRIES,
+                f"{len(entries)} entries after {len(made)} adds",
+            )
+        )
+        checks.append(
+            Check(
+                "Retention: it is the OLDEST entries that are dropped",
+                [e.id for e in entries] == [m.id for m in made[-HISTORY_MAX_ENTRIES:]],
+            )
+        )
+        checks.append(
+            Check(
+                "Retention: the newest run is always kept",
+                entries[-1].id == made[-1].id,
+            )
+        )
+        # Survivors must be whole -- not stripped-down summaries.
+        oldest_kept = made[-HISTORY_MAX_ENTRIES]
+        fetched = get_entry(oldest_kept.id, path)
+        checks.append(
+            Check(
+                "Retention: surviving entries are complete, not summarised",
+                fetched.section_result == oldest_kept.section_result
+                and _norm(fetched.vertices) == _norm(oldest_kept.vertices),
+            )
+        )
+        checks.append(
+            Check(
+                "Retention: an evicted entry is genuinely gone",
+                not any(e.id == made[0].id for e in entries),
+            )
+        )
+    return checks
+
+
+def _recovery_checks() -> list[Check]:
+    """A damaged store resets instead of 500-ing every endpoint.
+
+    Before this, a history.json that failed to decode raised out of
+    /history, /section, /beam and /baseline alike, with nothing in the UI
+    to say why and no way back short of deleting the file by hand. Now the
+    file is QUARANTINED -- renamed aside, never deleted, since it is the
+    user's data -- the store resets, and a warning naming the backup is
+    recorded for the UI."""
+    checks: list[Check] = []
+    cases = {
+        "truncated mid-write": lambda good: good[: len(good) // 2],
+        "empty file": lambda good: "",
+        "not JSON at all": lambda good: "\x00\x00garbage",
+        "valid JSON, wrong shape (an object)": lambda good: '{"entries": []}',
+        "valid JSON, wrong shape (list of numbers)": lambda good: "[1, 2, 3]",
+        "records missing a required field": lambda good: '[{"id": "x"}]',
+    }
+    for label, damage in cases.items():
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "history.json"
+            add_entry("6061", [(0, 0), (9, 0), (9, 9)], None, {"area": 40.5}, path=path)
+            good = path.read_text()
+            path.write_text(damage(good))
+            clear_store_warnings()
+
+            try:
+                entries = load_history(path)
+                raised = None
+            except Exception as exc:  # noqa: BLE001
+                entries, raised = None, exc
+
+            checks.append(
+                Check(
+                    f"Recovery ({label}): loads without raising",
+                    raised is None,
+                    f"{type(raised).__name__}: {raised}" if raised else "",
+                )
+            )
+            if raised is not None:
+                continue
+            checks.append(Check(f"Recovery ({label}): resets to an empty log", entries == []))
+            backups = [p for p in Path(tmp).iterdir() if ".corrupt-" in p.name]
+            checks.append(
+                Check(
+                    f"Recovery ({label}): the damaged file is kept, not deleted",
+                    len(backups) == 1,
+                    f"{[p.name for p in Path(tmp).iterdir()]}",
+                )
+            )
+            warnings = store_warnings()
+            checks.append(
+                Check(
+                    f"Recovery ({label}): a warning names the backup",
+                    bool(warnings) and any(backups[0].name in w for w in warnings if backups),
+                    f"{warnings}",
+                )
+            )
+            # ...and the store is usable again immediately afterwards.
+            add_entry("6063", [(0, 0), (4, 0), (4, 4)], None, {"area": 8.0}, path=path)
+            checks.append(
+                Check(f"Recovery ({label}): the store works again afterwards", len(load_history(path)) == 1)
+            )
+    clear_store_warnings()
+    return checks
 
 
 def _atomic_write_checks() -> list[Check]:

@@ -72,6 +72,8 @@ const beamBucklingGrid = document.getElementById("beam-buckling-grid");
 const bucklingNoAxialEl = document.getElementById("buckling-no-axial");
 const localBucklingSectionEl = document.getElementById("local-buckling-section");
 const localBucklingTableEl = document.getElementById("local-buckling-table");
+const busyIndicator = document.getElementById("busy-indicator");
+const busyIndicatorText = document.getElementById("busy-indicator-text");
 const chartStressEl = document.getElementById("chart-stress");
 const chartDeflectionEl = document.getElementById("chart-deflection");
 
@@ -139,6 +141,41 @@ function hideError() {
 }
 
 errorBannerClose.addEventListener("click", hideError);
+
+/* ------------------------------------------------------------------
+   Busy indicator
+
+   Section analysis on a real imported profile takes 1-3 s, and a full
+   pass (section, then suggestions, baseline and beam) runs to about 5 s.
+   Until now nothing on screen said so: the canvas just sat there, which
+   reads as "the click didn't register" rather than "this is working".
+
+   Reference-counted rather than a boolean, because several of these
+   overlap by design -- renderSectionResults fires the suggestions,
+   solid-fill and baseline lookups without awaiting them -- so the last
+   one to finish has to be the one that clears it.
+------------------------------------------------------------------ */
+
+let busyCount = 0;
+
+function setBusy(on, label) {
+  busyCount = Math.max(0, busyCount + (on ? 1 : -1));
+  const active = busyCount > 0;
+  if (active && label) busyIndicatorText.textContent = label;
+  busyIndicator.hidden = !active;
+  document.body.classList.toggle("is-busy", active);
+}
+
+/** Runs `fn` with the busy indicator up, and takes it down again however
+ * `fn` ends -- a failed analysis must not leave the app looking stuck. */
+async function withBusy(label, fn) {
+  setBusy(true, label);
+  try {
+    return await fn();
+  } finally {
+    setBusy(false);
+  }
+}
 
 /* ------------------------------------------------------------------
    Number formatting — tabular, unit-aware, matches the mono type scale
@@ -471,6 +508,19 @@ function drawHole(holePoints) {
 ------------------------------------------------------------------ */
 
 const CLOSE_HIT_PX = 10;
+// A click this close to the vertex just placed is a double-click, not a
+// second vertex. Smaller than CLOSE_HIT_PX so it can never swallow a
+// deliberate short edge that the close-loop test would have caught.
+const COINCIDENT_HIT_PX = 6;
+// Below this |Ixy|/sqrt(Ixx*Iyy) the section is symmetric enough that the
+// out-of-plane response is numerical dust, and reporting it is noise.
+const ASYMMETRY_VISIBLE = 1e-6;
+// The two "there is no safety factor" states, which are different facts
+// and used to render identically as "n/a".
+const SAFETY_FACTOR_TEXT = {
+  no_yield_strength: { value: "n/a", why: "this material has no yield strength on file" },
+  no_stress: { value: "∞", why: "this load case produces no bending stress" },
+};
 
 function updateToolbarState() {
   btnUndo.disabled = state.points.length === 0;
@@ -504,6 +554,21 @@ canvas.addEventListener("click", (ev) => {
       closeLoop();
       return;
     }
+  }
+
+  // Ignore a click that lands on the vertex just placed. A double-click
+  // otherwise puts two coincident vertices down: harmless to the engine,
+  // which accepts them, but the outline and the vertex count then say
+  // something the drawing doesn't, and it takes two undos to clear one
+  // apparent point. Checked in SCREEN space so the tolerance means the
+  // same thing at every zoom level, and only against the LAST point, so
+  // deliberately revisiting an earlier vertex still works.
+  if (state.points.length > 0) {
+    const last = worldToScreen(
+      state.points[state.points.length - 1].x,
+      state.points[state.points.length - 1].y
+    );
+    if (Math.hypot(sx - last.x, sy - last.y) <= COINCIDENT_HIT_PX) return;
   }
 
   state.points.push(rounded);
@@ -644,6 +709,7 @@ async function computeSection() {
   if (!state.isClosed || state.points.length < 3 || !state.selectedMaterial) return;
   const requestId = ++sectionRequestId;
   hideError();
+  setBusy(true, "Analyzing section\u2026");
   try {
     const body = await apiFetch("/section", {
       method: "POST",
@@ -668,6 +734,8 @@ async function computeSection() {
     sectionResultsEl.hidden = true;
     beamInputsEl.hidden = true;
     baselineSectionEl.hidden = true;
+  } finally {
+    setBusy(false);
   }
 }
 
@@ -802,6 +870,7 @@ let suggestionsRequestId = 0;
  * during review, via a delayed-response test. */
 async function refreshSuggestions(r) {
   const requestId = ++suggestionsRequestId;
+  setBusy(true, "Running design review\u2026");
   state.highlight = null;
   state.pinnedSuggestion = null;
   dfmListEl.innerHTML = "";
@@ -834,6 +903,8 @@ async function refreshSuggestions(r) {
   } catch (err) {
     if (requestId !== suggestionsRequestId) return;
     suggestionsSectionEl.hidden = true;
+  } finally {
+    setBusy(false);
   }
 }
 
@@ -1008,6 +1079,7 @@ dxfFileInput.addEventListener("change", async () => {
   formData.append("file", file);
   formData.append("material_name", state.selectedMaterial);
 
+  setBusy(true, "Importing DXF\u2026");
   try {
     const body = await apiFetch("/section/from-dxf", { method: "POST", body: formData });
     state.points = body.vertices.map(([x, y]) => ({ x, y }));
@@ -1023,6 +1095,8 @@ dxfFileInput.addEventListener("change", async () => {
     beamResultsEl.hidden = true;
   } catch (err) {
     showError(`DXF import failed: ${err.message}`);
+  } finally {
+    setBusy(false);
   }
 });
 
@@ -1046,6 +1120,7 @@ pdfFileInput.addEventListener("change", async () => {
   formData.append("file", file);
   formData.append("material_name", state.selectedMaterial);
 
+  setBusy(true, "Reading drawing\u2026");
   try {
     const body = await apiFetch("/section/from-pdf", { method: "POST", body: formData });
     state.points = body.vertices.map(([x, y]) => ({ x, y }));
@@ -1070,6 +1145,8 @@ pdfFileInput.addEventListener("change", async () => {
     // they are the useful part of the message, so pass them through whole
     // rather than collapsing to "import failed".
     showError(`PDF import failed: ${err.message}`);
+  } finally {
+    setBusy(false);
   }
 });
 
@@ -1215,6 +1292,7 @@ btnAnalyzeBeam.addEventListener("click", async () => {
 
   hideError();
   btnAnalyzeBeam.disabled = true;
+  setBusy(true, "Analyzing beam…");
   try {
     if (!state.sectionId) {
       // Profile was reloaded from history (or some other path that never
@@ -1259,6 +1337,7 @@ btnAnalyzeBeam.addEventListener("click", async () => {
     beamResultsEl.hidden = true;
   } finally {
     btnAnalyzeBeam.disabled = false;
+    setBusy(false);
   }
 });
 
@@ -1303,17 +1382,53 @@ function renderBeamResults(r) {
   summaryTile(beamSummaryGrid, "Max Moment", `${fmtNum(r.max_moment)} N·mm`, "", {
     sub: `@ ${fmtNum(r.max_moment_position)}mm`,
   });
-  summaryTile(beamSummaryGrid, "Max Bending Stress", `${fmtNum(r.max_bending_stress)} MPa`);
+  // Under unsymmetric bending the peak fibre isn't the obvious one, so say
+  // where it is rather than leaving the number unattributable.
+  summaryTile(beamSummaryGrid, "Max Bending Stress", `${fmtNum(r.max_bending_stress)} MPa`, "", {
+    sub: r.max_bending_stress_point
+      ? `at fibre ${fmtNum(r.max_bending_stress_point[0], { digits: 1 })}, ${fmtNum(
+          r.max_bending_stress_point[1],
+          { digits: 1 }
+        )} mm from centroid`
+      : undefined,
+  });
+  // Three genuinely different states, which all used to render as "n/a":
+  // a real factor, an undefined one (no yield strength on file), and an
+  // infinite one (this load case produces no bending stress at all).
   summaryTile(
     beamSummaryGrid,
     "Bending Safety Factor",
-    r.safety_factor === null ? "n/a" : fmtNum(r.safety_factor, { digits: 2 }),
+    SAFETY_FACTOR_TEXT[r.safety_factor_status]
+      ? SAFETY_FACTOR_TEXT[r.safety_factor_status].value
+      : fmtNum(r.safety_factor, { digits: 2 }),
     "",
-    { highlight: true, className: safetyFactorClass(r.safety_factor) }
+    {
+      highlight: true,
+      className: SAFETY_FACTOR_TEXT[r.safety_factor_status]
+        ? "sf-na"
+        : safetyFactorClass(r.safety_factor),
+      sub: SAFETY_FACTOR_TEXT[r.safety_factor_status]
+        ? SAFETY_FACTOR_TEXT[r.safety_factor_status].why
+        : undefined,
+    }
   );
   summaryTile(beamSummaryGrid, "Max Deflection", `${fmtNum(r.max_deflection, { digits: 4 })} mm`, "", {
     sub: `@ ${fmtNum(r.max_deflection_position)}mm`,
   });
+  // Only meaningful when the section's principal axes aren't the sketch
+  // axes; on a symmetric profile it is identically zero and saying so
+  // would be noise.
+  if (r.asymmetry > ASYMMETRY_VISIBLE) {
+    summaryTile(
+      beamSummaryGrid,
+      "Out-of-Plane Deflection",
+      `${fmtNum(r.max_deflection_transverse, { digits: 4 })} mm`,
+      "",
+      {
+        sub: `resultant ${fmtNum(r.max_deflection_resultant, { digits: 4 })}mm — this section bends out of the load plane`,
+      }
+    );
+  }
   r.reactions.forEach((reaction) => {
     summaryTile(
       beamSummaryGrid,
@@ -1326,7 +1441,7 @@ function renderBeamResults(r) {
   summaryTile(beamBucklingGrid, "Euler Buckling Load", `${fmtNum(r.euler_buckling_load)} N`, "", {
     sub: `K=${r.effective_length_factor} (whole column)`,
   });
-  if (r.buckling_safety_factor !== null) {
+  if (r.buckling_status === "compression") {
     summaryTile(
       beamBucklingGrid,
       "Euler Safety Factor",
@@ -1334,8 +1449,16 @@ function renderBeamResults(r) {
       "",
       { highlight: true, className: safetyFactorClass(r.buckling_safety_factor) }
     );
+  } else if (r.buckling_status === "tension") {
+    // Buckling is a compression failure mode. This used to divide through
+    // anyway and show a negative "safety factor".
+    summaryTile(beamBucklingGrid, "Euler Safety Factor", "N/A — tension", "", {
+      highlight: true,
+      className: "sf-na",
+      sub: "a member in tension cannot buckle",
+    });
   }
-  bucklingNoAxialEl.hidden = r.buckling_safety_factor !== null;
+  bucklingNoAxialEl.hidden = r.buckling_status !== "no_axial";
 
   renderLocalBuckling(r.local_buckling);
 
@@ -1387,13 +1510,29 @@ function renderLocalBuckling(lb) {
   localBucklingSectionEl.hidden = false;
 
   const head = document.createElement("tr");
-  ["Wall", "Edges", "b (mm)", "t (mm)", "b/t", "k", "σcr (MPa)", "EC9 Class", "Applied σ (MPa)", "SF"].forEach(
-    (h) => {
-      const th = document.createElement("th");
-      th.textContent = h;
-      head.appendChild(th);
-    }
-  );
+  // Two safety factors, deliberately side by side and separately named.
+  // "Elastic SF" is pure plate theory and has no upper bound, so on a
+  // stocky wall it reads absurdly high (324 on a 6mm wall that yields at
+  // 8.7). "Effective SF" caps the wall's capacity at the proof stress and
+  // is the number that actually limits it.
+  [
+    ["Wall", ""],
+    ["Edges", ""],
+    ["b (mm)", ""],
+    ["t (mm)", ""],
+    ["b/t", ""],
+    ["k", ""],
+    ["σcr (MPa)", "elastic critical stress — perfect-plate theory, uncapped"],
+    ["EC9 Class", "EN 1999-1-1 Table 6.2"],
+    ["Applied σ (MPa)", "worst compressive fibre on this wall"],
+    ["Elastic SF", "σcr / applied — how close this wall is to buckling"],
+    ["Effective SF", "min(σcr, proof stress) / applied — the wall's real limit"],
+  ].forEach(([h, title]) => {
+    const th = document.createElement("th");
+    th.textContent = h;
+    if (title) th.title = title;
+    head.appendChild(th);
+  });
   localBucklingTableEl.appendChild(head);
 
   lb.segments.forEach((s) => {
@@ -1418,7 +1557,14 @@ function renderLocalBuckling(lb) {
       [s.elastic_critical_stress === null ? "—" : fmtNum(s.elastic_critical_stress, { digits: 1 }), ""],
       [s.section_class === null ? "—" : String(s.section_class), ""],
       [s.applied_stress === null ? "—" : fmtNum(s.applied_stress, { digits: 1 }), ""],
-      [s.safety_factor === null ? "—" : fmtNum(s.safety_factor, { digits: 2 }), safetyFactorClass(s.safety_factor)],
+      // The elastic factor is deliberately NOT colour-coded by severity:
+      // it is a true statement about buckling, but colouring it green
+      // would be exactly the reassurance the yield cap exists to withhold.
+      [s.safety_factor === null ? "—" : fmtNum(s.safety_factor, { digits: 2 }), "lb-elastic-sf"],
+      [
+        s.effective_safety_factor === null ? "—" : fmtNum(s.effective_safety_factor, { digits: 2 }),
+        safetyFactorClass(s.effective_safety_factor),
+      ],
     ];
     cells.forEach(([text, className]) => {
       const td = document.createElement("td");
@@ -2025,10 +2171,30 @@ btnTopbarBaseline.addEventListener("click", openHistory);
    Init
 ------------------------------------------------------------------ */
 
+/** Reports any local-state file the server had to reset on startup.
+ *
+ * A store that can't be decoded is quarantined and reset rather than
+ * 500-ing every endpoint (see eat/storage.py), but that has to be VISIBLE
+ * -- a reset material list in particular leaves the app unable to analyze
+ * anything, and silently showing an empty dropdown would be baffling.
+ * Uses the error banner rather than a new surface: it is the one place
+ * the user already looks when something is wrong. */
+async function reportStoreWarnings() {
+  try {
+    const body = await apiFetch("/warnings");
+    if (body && body.warnings && body.warnings.length > 0) {
+      showError(body.warnings.join("  •  "));
+    }
+  } catch (_) {
+    /* the warnings channel itself failing must not break startup */
+  }
+}
+
 renderPointLoads();
 updateToolbarState();
 loadMaterials();
 refreshBaselineName(); // topbar readout is meaningful before any profile is loaded
+reportStoreWarnings();
 layoutCanvas();
 
 let resizeTimeout;
