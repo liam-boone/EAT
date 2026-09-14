@@ -43,36 +43,48 @@ sweep had deliberately left alone — unsymmetric bending, the local-
 buckling yield cap, history retention, corrupt-store recovery, a busy
 indicator, shared profile validation, an LRU on the section cache, the
 tensile-axial and zero-load reporting states, and the PDF `page=0` bug.
-See that commit's message; the conventions it established are below.
+See that commit's message (`3b5f5ad`); the conventions it established
+are below.
 
-The two findings worth carrying forward as knowledge:
+`README.md` was then rewritten from scratch to close the onboarding gaps
+that sweep found: a real step-by-step install section (separate Mac/
+Windows tracks, aimed at someone with no git/terminal/Python experience —
+including which python.org button NOT to click, since it defaults to the
+newest release rather than the 3.12 this project needs), the walkthrough
+now covers PDF import, Design Review, History and Baseline comparison
+(previously missing entirely), the "Section results appear immediately"
+claim now matches reality (Area + Mass Per Length up front, the rest
+under More Info), and the old "v1 scope" section — which read as a claim
+that PDF import wasn't supported — is replaced by a "Current scope"
+section listing what's actually supported today vs. genuinely out of
+scope. Every claim in it (button labels, the 25-entry history cap, the
+builtin baseline's name, CLI flag names, python.org's current default
+download, git-scm.com's Windows URL) was checked against the live source
+or the live page, not carried over from memory. Performance work
+(mesh density) was explicitly left out of this pass.
 
-- **`min(Ixx, Iyy)` is not the weak axis.** It only coincides with the
-  least principal second moment when `Ixy = 0`. Euler buckling used it
-  and overstated Pcr by 1.92x on the project's own L-angle fixture. The
-  existing test missed it because it only compared Pcr *ratios* between
-  boundary conditions, which divides I out entirely. Any new check on a
-  section property needs at least one asymmetric fixture.
-- **`sectionproperties` meshes through a C library that does not
-  validate its input** — handed a self-intersecting ring, a NaN vertex or
-  a hairline sliver it segfaults or hangs rather than raising, and in the
-  server that kills the worker. `eat.section._validate_profile` is a hard
-  prerequisite, not a nicety; see its docstring for why it deliberately
-  is not a bare `polygon.is_valid` test.
+Two findings worth carrying forward, both already fully written up where
+the code lives rather than restated here:
 
-Two things from the frontend sweep worth knowing without re-reading the
-commit:
+- `min(Ixx, Iyy)` is **not** the weak axis unless `Ixy = 0` — see
+  `eat/beam.py`'s module docstring and `_minimum_principal_i`. Any new
+  check on a section property needs at least one asymmetric fixture; the
+  existing Pcr-ratio test couldn't have caught this because it divides I
+  out entirely.
+- `sectionproperties`'s mesher doesn't validate its input (segfaults or
+  hangs on bad geometry rather than raising) — see `eat/profile.py`'s
+  module docstring for what that means for any new profile-consuming code.
 
-- **Design review (DFM/Structural) is split by what you *do* about a
-  finding**, not by the physics the check used — sharp corners are DFM
-  despite being a stress riser, because the fix is a manufacturing change
-  either way. See `suggestionCategory` in `frontend/app.js`.
-- **`verify_frontend.py`'s history/baseline restore runs in a `finally`**
-  now, closing the hole that let a crashed test run leave fixtures in
-  Liam's real `eat/history.json` (see "Working tree" below — that
-  incident is why this file's restore discipline exists at all). Any
-  throwaway driver script still needs to snapshot/restore both files
-  itself; the suite script does not protect scripts that bypass it.
+Same treatment for two things from the frontend sweep:
+
+- Design Review's DFM/Structural split is by what you *do* about a
+  finding, not the physics — see the comment above `SUGGESTION_CATEGORIES`
+  in `frontend/app.js`.
+- `verify_frontend.py`'s history/baseline restore runs in a `finally`
+  (see `state_snapshotted` in that file), closing the hole that once let
+  a crashed run leave fixtures in Liam's real `eat/history.json`. Any
+  throwaway driver script still needs its own snapshot/restore — the
+  suite doesn't protect scripts that bypass it.
 
 ## Working tree right now
 
@@ -86,13 +98,12 @@ commit:
   `eat/verify_pdf.py` and parts of `verify_api.py`/`verify_frontend.py`
   (those skip/fail gracefully if missing) — keep them in the working
   directory.
-- `eat/history.json` sits at 48 entries, which are test fixtures from an
-  earlier crashed debug run rather than Liam's real usage (all same-day,
-  all matching automated-test geometry/materials). `HISTORY_MAX_ENTRIES`
-  is 25, so the next analysis trims it to the newest 25 and it settles
-  there — Liam confirmed those entries are not worth preserving, so this
-  needs no action. `eat/baseline.json` is at its correct default
-  (`{"type": "builtin"}`).
+- `eat/history.json` has already settled at its `HISTORY_MAX_ENTRIES`
+  cap of 25 (something wrote to it since the last handoff — likely a
+  verify run). Those 25 are still leftover test fixtures from an earlier
+  crashed debug run, not Liam's real usage; Liam confirmed they're not
+  worth preserving, so no action needed. `eat/baseline.json` is at its
+  correct default (`{"type": "builtin"}`).
 - `EAT-audit-sheet.html` in the project root — the QA sweep's findings
   as a standalone page, written for Liam to read. Untracked on purpose;
   delete it once read.
@@ -158,17 +169,13 @@ commit:
   a full pass costs. A busy indicator now covers the symptom; the fix is
   to size elements from local wall thickness instead. Re-measure before
   and after, on the supplier PDFs in the project root.
-- **Repo is private, so README step 1 fails for anyone else** — the QA
-  sweep confirmed `git clone https://github.com/liam-boone/EAT.git` gives
-  a 404 unauthenticated (`git ls-remote` succeeds with Liam's own
-  credentials). Either make it public or document that collaborator
-  access has to be granted first. Liam's call; untouched.
-- **README omits four shipped features** — PDF import, Design Review,
-  History and the baseline comparison appear nowhere in it, and the "v1
-  scope" section still says "DXF import/export only", which reads as a
-  statement that PDF import isn't supported. Bigger than the "v1 scope
-  framing" rewrite listed under the release checklist below. Liam has the
-  findings; the framing decision is his.
+- **Repo visibility** — `git clone https://github.com/liam-boone/EAT.git`
+  still 404s unauthenticated (confirmed again while rewriting the README;
+  `git ls-remote` succeeds with Liam's own credentials, so the repo just
+  isn't public). README.md's install steps are written as if a reader can
+  reach that URL — they're correct once the repo is public or the reader
+  has collaborator access, but not before. This is Liam's call and he's
+  deciding it separately from the doc work; not something to act on here.
 
 - **Notches that leave a manufacturable wall** — the part of the
   narrow-notch backlog item that is *not* solved. A slot leaving 1.5mm in
@@ -177,8 +184,6 @@ commit:
   accidental one, which local geometry does not carry. Candidates if ever
   worth revisiting: user-tagged functional features, or
   symmetry/repetition detection.
-- **Release checklist** (do at actual v1 release, not before): rewrite
-  `README.md`'s "v1 scope" framing into a real feature list.
 - **Right-column order** — "Analyze Beam" sits at the bottom of the right
   column, below the baseline comparison, so on a 16:9 screen it's below
   the fold (the click scrolls Beam Results into view, which covers the
